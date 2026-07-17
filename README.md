@@ -20,7 +20,7 @@ on your Mac.
 ## Requirements
 
 - macOS 14 Sonoma or newer
-- Xcode Command Line Tools or Xcode with the macOS SDK
+- Xcode 26 or its Command Line Tools (Swift 6 language mode)
 
 Release builds are Universal 2 and run natively on Apple silicon and Intel Macs.
 

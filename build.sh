@@ -30,6 +30,7 @@ for ARCH in "${BUILD_ARCHS[@]}"; do
     esac
     echo "  • $ARCH"
     swiftc -O -parse-as-library \
+        -swift-version 6 \
         -strict-concurrency=complete -warnings-as-errors \
         -target "$ARCH-apple-macos14.0" \
         -framework SwiftUI -framework AppKit -framework Combine \
