@@ -1,0 +1,21 @@
+# macOS and local tooling
+.DS_Store
+.claude/
+.swiftpm/
+.build/
+DerivedData/
+*.xcuserstate
+
+# Generated application and release artifacts
+DiskTree.app/
+DiskTree.zip
+*.dSYM/
+
+# Signing material must never be committed
+*.cer
+*.p12
+*.provisionprofile
+
+# Local scratch files
+scratch_*
+*.log
