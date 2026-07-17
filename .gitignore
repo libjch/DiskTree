@@ -9,6 +9,7 @@ DerivedData/
 # Generated application and release artifacts
 DiskTree.app/
 DiskTree.zip
+DiskTree.dmg
 *.dSYM/
 
 # Signing material must never be committed

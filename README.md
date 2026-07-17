@@ -104,7 +104,8 @@ xcrun notarytool store-credentials "DiskTree" \
   --password "YOUR_APP_SPECIFIC_PASSWORD"
 ```
 
-Then create a signed, notarized, stapled, and Gatekeeper-verified `DiskTree.zip`:
+Then create a signed, notarized, stapled, and Gatekeeper-verified `DiskTree.dmg`.
+The image contains the app and an Applications shortcut for drag-to-install:
 
 ```bash
 ./notarize.sh
@@ -116,7 +117,7 @@ Optional release environment variables:
 | --- | --- | --- |
 | `DISKTREE_NOTARY_PROFILE` | Keychain profile passed to `notarytool` | `DiskTree` |
 | `DISKTREE_SIGNING_IDENTITY` | Exact Developer ID identity | First matching identity |
-| `DISKTREE_SITE_DOWNLOADS` | Directory that receives a copy of the ZIP | No copy |
+| `DISKTREE_SITE_DOWNLOADS` | Directory that receives a copy of the DMG | No copy |
 
 Never commit certificates, private keys, app-specific passwords, or exported
 signing identities.

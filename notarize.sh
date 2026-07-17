@@ -1,5 +1,5 @@
 #!/bin/bash
-# Produces a notarized, Gatekeeper-approved DiskTree.zip for direct distribution.
+# Produces a notarized, Gatekeeper-approved DiskTree.dmg for direct distribution.
 #
 # One-time setup (see README "Distribution"):
 #   1. Create a "Developer ID Application" certificate in your Apple Developer
@@ -11,9 +11,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="DiskTree.app"
-ZIP="DiskTree.zip"
+DMG="DiskTree.dmg"
+VOLUME_NAME="DiskTree"
 PROFILE="${DISKTREE_NOTARY_PROFILE:-DiskTree}"
 SITE_DOWNLOADS="${DISKTREE_SITE_DOWNLOADS:-}"
+DMG_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/disktree-dmg.XXXXXX")"
+trap 'rm -rf "$DMG_STAGING"' EXIT
 
 # Always build fresh first.
 ./build.sh
@@ -36,30 +39,45 @@ echo "› Signing: $IDENTITY (hardened runtime)"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-# 3. Zip and submit to Apple; --wait blocks until Apple returns Accepted/Invalid.
-rm -f "$ZIP"
-ditto -c -k --norsrc --keepParent "$APP" "$ZIP"
+# 3. Build a compressed disk image with the standard Applications shortcut.
+echo "› Creating disk image…"
+ditto "$APP" "$DMG_STAGING/$APP"
+ln -s /Applications "$DMG_STAGING/Applications"
+rm -f "$DMG"
+hdiutil create \
+    -volname "$VOLUME_NAME" \
+    -srcfolder "$DMG_STAGING" \
+    -fs HFS+ \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    -ov "$DMG"
+
+# Sign the container itself so Gatekeeper can validate its primary signature.
+echo "› Signing disk image…"
+codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+codesign --verify --strict --verbose=2 "$DMG"
+
+# 4. Submit the complete disk image; --wait blocks until Apple returns.
 echo "› Submitting to Apple notary service (this can take a few minutes)…"
-xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
 
-# 4. Staple the ticket into the app so it validates offline, then re-zip.
+# 5. Staple the notarization ticket to the disk image for offline validation.
 echo "› Stapling ticket…"
-xcrun stapler staple "$APP"
-xcrun stapler validate "$APP"
-rm -f "$ZIP"
-ditto -c -k --norsrc --keepParent "$APP" "$ZIP"
+xcrun stapler staple "$DMG"
+xcrun stapler validate "$DMG"
 
-# 5. Prove Gatekeeper will accept it.
+# 6. Prove Gatekeeper will accept both the app and its distribution container.
 echo "› Gatekeeper assessment:"
 spctl -a -vvv --type execute "$APP" 2>&1 | sed 's/^/    /'
+spctl -a -vvv --type open --context context:primary-signature "$DMG" 2>&1 | sed 's/^/    /'
 
-# 6. Optionally copy it to a separate website checkout.
+# 7. Optionally copy it to a separate website checkout.
 if [ -n "$SITE_DOWNLOADS" ]; then
     mkdir -p "$SITE_DOWNLOADS"
-    cp "$ZIP" "$SITE_DOWNLOADS/DiskTree.zip"
+    cp "$DMG" "$SITE_DOWNLOADS/DiskTree.dmg"
 fi
 
-echo "✓ Notarized, stapled → $ZIP"
+echo "✓ Notarized, stapled → $DMG"
 if [ -n "$SITE_DOWNLOADS" ]; then
-    echo "  Copied to $SITE_DOWNLOADS/DiskTree.zip"
+    echo "  Copied to $SITE_DOWNLOADS/DiskTree.dmg"
 fi
