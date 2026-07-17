@@ -60,7 +60,7 @@ fi
 # like Full Disk Access across rebuilds. Falls back to ad-hoc otherwise.
 IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -Eo '"(Developer ID Application|Apple Development)[^"]*"' \
-    | head -1 | tr -d '"')"
+    | head -1 | tr -d '"' || true)"
 
 if [ -n "$IDENTITY" ]; then
     echo "› Code signing with: $IDENTITY"
