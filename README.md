@@ -12,7 +12,7 @@ on your Mac.
 - Scans a folder, your home directory, or an entire disk
 - Shows allocated-on-disk sizes in a tree and nested treemap
 - Streams partial results during large scans
-- Reveals files in Finder and moves selected descendants to the Trash
+- Reveals selected files and folders in Finder
 - Re-scans individual folders and charts scan history
 - Avoids following symbolic links and duplicate directory inodes
 - Restores the latest scan on launch
@@ -72,8 +72,7 @@ again.
 - DiskTree has no telemetry and makes no network requests.
 - Scan results and history are stored under the user's Application Support
   directory.
-- Moving an item to the Trash always requires confirmation.
-- The root selected for a scan cannot be moved to the Trash from DiskTree.
+- DiskTree is read-only: it does not delete, move, or modify scanned items.
 
 ## Project layout
 

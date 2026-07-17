@@ -255,7 +255,7 @@ struct ContentView: View {
                     Text("\(sel.fileCount) files").font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Text("Select an item to see its details. Use the toolbar to reveal it in Finder or move it to Trash.")
+                Text("Select an item to see its details or reveal it in Finder.")
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer()
             }
@@ -308,7 +308,7 @@ struct ContentView: View {
                 .labelStyle(.titleAndIcon)
             }
         }
-        // Selection actions — right side, enabled only with a selection.
+        // Selection action — right side, enabled only with a selection.
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 if let sel = selection { NSWorkspace.shared.activateFileViewerSelecting([sel.url]) }
@@ -317,25 +317,7 @@ struct ContentView: View {
             }
             .disabled(selection == nil)
             .help("Reveal the selected item in Finder.")
-
-            Button(role: .destructive) {
-                if let sel = selection { moveToTrash(sel) }
-            } label: {
-                Label("Move to Trash", systemImage: "trash")
-            }
-            .disabled(!canMoveSelectionToTrash)
-            .help(canMoveSelectionToTrash
-                  ? "Move the selected item to the Trash."
-                  : "The root of a scan cannot be moved to the Trash.")
         }
-    }
-
-    /// Never offer to trash the scan root. A user may scan `/`, their home
-    /// directory, or another important folder; destructive actions are limited
-    /// to descendants that can be removed cleanly from the displayed tree.
-    private var canMoveSelectionToTrash: Bool {
-        guard let selection else { return false }
-        return selection.parent != nil
     }
 
     /// Re-scan the current root to reflect on-disk changes.
@@ -383,46 +365,6 @@ struct ContentView: View {
         // Auto-expand the scan root so its top-level folders appear as they're found.
         expanded = [url.path]
         scanner.scan(url)
-    }
-
-    private func moveToTrash(_ node: FileNode) {
-        guard node.parent != nil else { return }
-        let alert = NSAlert()
-        alert.messageText = "Move “\(node.name)” to Trash?"
-        alert.informativeText = "This frees \(formatBytes(node.size)). You can restore it from the Trash until it's emptied."
-        alert.addButton(withTitle: "Move to Trash")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        // First button ("Move to Trash") has raw value 1000.
-        guard alert.runModal().rawValue == 1000 else { return }
-
-        do {
-            try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
-            // Remove from the tree and roll the freed space up to ancestors.
-            removeFromTree(node)
-            if selection == node { selection = nil }
-            if treemapRoot == node { treemapRoot = node.parent === scanner.root ? nil : node.parent }
-        } catch {
-            let err = NSAlert()
-            err.messageText = "Couldn't move to Trash"
-            err.informativeText = error.localizedDescription
-            err.runModal()
-        }
-    }
-
-    private func removeFromTree(_ node: FileNode) {
-        let freed = node.size
-        var ancestor = node.parent
-        while let a = ancestor {
-            a.size -= freed
-            a.fileCount -= node.fileCount
-            ancestor = a.parent
-        }
-        node.parent?.children?.removeAll { $0 === node }
-        // Force SwiftUI to re-read the tree.
-        scanner.objectWillChange.send()
-        // Keep the persisted copy in sync with the freed space.
-        if let root = scanner.root { scanner.persist(root) }
     }
 }
 
