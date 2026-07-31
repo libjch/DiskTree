@@ -1,9 +1,15 @@
 import Foundation
 
 /// A top-level folder's size at scan time (for the history chart).
-struct CategorySize: Codable, Hashable {
+struct CategorySize: Codable, Hashable, Sendable {
     let name: String
     let size: Int64
+}
+
+/// One folder's child breakdown at a point in time (for the history chart).
+struct HistorySample: Sendable {
+    let date: Date
+    let categories: [CategorySize]
 }
 
 /// One archived scan in the (append-only) history.
@@ -36,9 +42,16 @@ enum ScanStore {
     // MARK: Locations
 
     private static var baseDir: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory,
+        // Tests/dev can redirect all persistence to a throwaway directory via
+        // DISKTREE_DATA_DIR, so nothing ever needs to delete the real one.
+        let dir: URL
+        if let override = ProcessInfo.processInfo.environment["DISKTREE_DATA_DIR"] {
+            dir = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            dir = FileManager.default.urls(for: .applicationSupportDirectory,
                                            in: .userDomainMask)[0]
-            .appendingPathComponent("DiskTree", isDirectory: true)
+                .appendingPathComponent("DiskTree", isDirectory: true)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -108,6 +121,31 @@ enum ScanStore {
               let unpacked = unpack(raw)
         else { return nil }
         return decodeTree(unpacked)
+    }
+
+    /// Child breakdown of one folder across the archived scans of `rootPath`,
+    /// oldest first. For the scan root itself this uses the fast inline
+    /// categories; for a deeper folder it decodes each archive and navigates to
+    /// it — so call this off the main thread.
+    static func folderHistory(rootPath: String, folderPath: String) -> [HistorySample] {
+        let entries = readIndex().filter { $0.rootPath == rootPath }.sorted { $0.date < $1.date }
+        if folderPath == rootPath {
+            return entries.map { HistorySample(date: $0.date, categories: $0.categories ?? []) }
+        }
+        return entries.compactMap { entry in
+            guard let (root, date) = loadArchived(entry),
+                  let node = findNode(root, path: folderPath) else { return nil }
+            return HistorySample(date: date, categories: topCategories(of: node))
+        }
+    }
+
+    /// Locate a node by its absolute path within an archived tree.
+    private static func findNode(_ node: FileNode, path: String) -> FileNode? {
+        if node.path == path { return node }
+        for child in node.children ?? [] where path == child.path || path.hasPrefix(child.path + "/") {
+            return findNode(child, path: path)
+        }
+        return nil
     }
 
     // MARK: Load current

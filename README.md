@@ -131,3 +131,9 @@ welcome.
 
 Please report security-sensitive problems as described in
 [SECURITY.md](SECURITY.md).
+
+## Development data location
+
+Scans and history live in `~/Library/Application Support/DiskTree/`. Set
+`DISKTREE_DATA_DIR=/some/throwaway/path` to redirect all persistence elsewhere —
+use this for tests so real history is never at risk.

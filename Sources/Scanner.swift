@@ -242,6 +242,9 @@ private final class ScanEngine: @unchecked Sendable {
     private var lastPath = ""
     private var rootNode: FileNode?
     private var lastSnapshot = Date()
+    /// Device of the scanned root. The walk stays on this one volume so scanning
+    /// a disk never descends into other mounted disks (e.g. /Volumes/…).
+    private var rootDevice: Int64 = 0
 
     // Balance parallelism against I/O saturation; a handful of workers hides
     // syscall latency without thrashing.
@@ -280,8 +283,10 @@ private final class ScanEngine: @unchecked Sendable {
             return Result(root: nil, count: 0)
         }
 
+        let rootKey = inodeKey(for: rootURL)
+        rootDevice = rootKey?.dev ?? 0
         cond.lock()
-        if let key = inodeKey(for: rootURL) { visited.insert(key) }
+        if let key = rootKey { visited.insert(key) }
         stack.append((rootURL, root))
         pending = 1
         cond.unlock()
@@ -356,9 +361,12 @@ private final class ScanEngine: @unchecked Sendable {
         var children = fileChildren
         var enqueued = 0
         for c in dirCandidates {
-            // Skip a directory already reached via another path (firmlink, bind
-            // mount, hard-linked dir) so its contents aren't counted twice.
             if let key = c.key {
+                // Stay on the scanned volume — don't descend into other mounted
+                // disks (they live under /Volumes on a different device).
+                if rootDevice != 0 && key.dev != rootDevice { continue }
+                // Skip a directory already reached via another path (firmlink,
+                // bind mount, hard-linked dir) so it isn't counted twice.
                 if visited.contains(key) { continue }
                 visited.insert(key)
             }

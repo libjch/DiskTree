@@ -11,6 +11,8 @@ struct ContentView: View {
     /// identity churn of progressive scan snapshots.
     @State private var expanded: Set<String> = []
     @State private var historyRequest: HistoryRequest?
+    @State private var showDiskPicker = false
+    @State private var volumeChoices: [VolumeChoice] = []
     /// Cached count of archived scans for the current folder (drives the History
     /// button's enabled state without reading disk on every render).
     @State private var historyCount = 0
@@ -41,7 +43,14 @@ struct ContentView: View {
         }
         .onChange(of: scanner.lastScanDate) { refreshHistoryCount() }
         .sheet(item: $historyRequest) { req in
-            HistoryChartView(rootPath: req.rootPath)
+            HistoryChartView(request: req)
+        }
+        .confirmationDialog("Which disk do you want to scan?",
+                            isPresented: $showDiskPicker, titleVisibility: .visible) {
+            ForEach(volumeChoices) { vol in
+                Button(vol.label) { scan(vol.url) }
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -83,7 +92,8 @@ struct ContentView: View {
                         List(selection: $selection) {
                             OutlineRow(node: displayRoot, total: max(displayRoot.size, 1),
                                        selection: $selection, expanded: $expanded,
-                                       onRescan: { scanner.rescanSubtree($0) })
+                                       onRescan: { scanner.rescanSubtree($0) },
+                                       onShowHistory: { showHistory(for: $0) })
                         }
                         .listStyle(.sidebar)
                         .onChange(of: selection) { revealInOutline(selection, proxy: proxy) }
@@ -152,11 +162,11 @@ struct ContentView: View {
                     .multilineTextAlignment(.center).padding(.horizontal)
             }
             VStack(spacing: 8) {
-                Button { scan(URL(fileURLWithPath: "/")) } label: {
+                Button { scanDisk() } label: {
                     Label("Scan Disk", systemImage: "externaldrive")
                 }
                 .controlSize(.large).buttonStyle(.borderedProminent)
-                .help("Scans the whole disk (/).")
+                .help("Scan your Mac's disk (asks which one if several are connected).")
                 Button { chooseAndScan() } label: {
                     Label("Choose Folder…", systemImage: "folder")
                 }
@@ -193,7 +203,8 @@ struct ContentView: View {
                                     treemapRoot = drilled
                                     selection = drilled
                                 },
-                                onRescan: { scanner.rescanSubtree($0) })
+                                onRescan: { scanner.rescanSubtree($0) },
+                                onShowHistory: { showHistory(for: $0) })
                     .background(Color(nsColor: .textBackgroundColor))
                     Divider()
                     infoBar
@@ -270,12 +281,12 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         // Scan actions — left side. "Scan Disk" is the prominent default.
         ToolbarItemGroup(placement: .navigation) {
-            Button { scan(URL(fileURLWithPath: "/")) } label: {
+            Button { scanDisk() } label: {
                 Label("Scan Disk", systemImage: "externaldrive")
             }
             .buttonStyle(.borderedProminent)
             .labelStyle(.titleAndIcon)
-            .help("Scan the whole disk (/). A full scan may need Full Disk Access.")
+            .help("Scan your Mac's disk. If other disks are connected, you'll be asked which one. A full scan may need Full Disk Access.")
 
             Button { chooseAndScan() } label: {
                 Label("Choose Folder…", systemImage: "folder")
@@ -291,7 +302,7 @@ struct ContentView: View {
             .help("Re-scan the current folder to pick up changes.")
 
             Button {
-                historyRequest = HistoryRequest(rootPath: scanner.root?.path ?? "")
+                if let root = scanner.root { showHistory(for: root) }
             } label: {
                 Label("History", systemImage: "chart.line.uptrend.xyaxis")
             }
@@ -320,6 +331,38 @@ struct ContentView: View {
         }
     }
 
+    /// "Scan Disk": scan the startup volume, or ask which one when more than one
+    /// disk is mounted (external drives, etc.).
+    private func scanDisk() {
+        let volumes = mountedVolumes()
+        if volumes.count <= 1 {
+            scan(URL(fileURLWithPath: "/"))
+        } else {
+            volumeChoices = volumes
+            showDiskPicker = true
+        }
+    }
+
+    private func mountedVolumes() -> [VolumeChoice] {
+        let keys: Set<URLResourceKey> = [.volumeNameKey, .volumeIsBrowsableKey,
+                                         .volumeIsRootFileSystemKey,
+                                         .volumeTotalCapacityKey, .volumeAvailableCapacityKey]
+        guard let urls = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes])
+        else { return [] }
+        let volumes: [VolumeChoice] = urls.compactMap { url in
+            guard let v = try? url.resourceValues(forKeys: keys),
+                  v.volumeIsBrowsable == true else { return nil }
+            let total = Int64(v.volumeTotalCapacity ?? 0)
+            let avail = Int64(v.volumeAvailableCapacity ?? 0)
+            return VolumeChoice(name: v.volumeName ?? url.lastPathComponent, url: url,
+                                isRoot: v.volumeIsRootFileSystem ?? false,
+                                used: max(0, total - avail), total: total)
+        }
+        // Startup disk first, then alphabetical.
+        return volumes.sorted { ($0.isRoot ? 0 : 1, $0.name) < ($1.isRoot ? 0 : 1, $1.name) }
+    }
+
     /// Re-scan the current root to reflect on-disk changes.
     private func refreshCurrent() {
         guard let root = scanner.root else { return }
@@ -328,6 +371,14 @@ struct ContentView: View {
 
     private func refreshHistoryCount() {
         historyCount = scanner.root.map { ScanStore.history(forRootPath: $0.path).count } ?? 0
+    }
+
+    /// Open the history chart for a folder's children over time. History is keyed
+    /// by the scanned root; `node` picks which folder inside it to chart.
+    private func showHistory(for node: FileNode) {
+        historyRequest = HistoryRequest(rootPath: scanner.root?.path ?? node.path,
+                                        folderPath: node.path,
+                                        folderName: node.name)
     }
 
     /// When something is selected (e.g. by clicking a treemap tile), expand its
@@ -368,6 +419,21 @@ struct ContentView: View {
     }
 }
 
+/// A mounted volume the user can choose to scan.
+struct VolumeChoice: Identifiable {
+    let id = UUID()
+    let name: String
+    let url: URL
+    let isRoot: Bool
+    let used: Int64
+    let total: Int64
+
+    var label: String {
+        let size = total > 0 ? " — \(formatBytes(used)) used" : ""
+        return isRoot ? "\(name) (this Mac)\(size)" : "\(name)\(size)"
+    }
+}
+
 /// One recursive row in the outline tree with a proportional size bar.
 struct OutlineRow: View {
     let node: FileNode
@@ -375,6 +441,7 @@ struct OutlineRow: View {
     @Binding var selection: FileNode?
     @Binding var expanded: Set<String>
     var onRescan: (FileNode) -> Void
+    var onShowHistory: (FileNode) -> Void
 
     var body: some View {
         if let children = node.children, !children.isEmpty {
@@ -382,7 +449,7 @@ struct OutlineRow: View {
                 ForEach(children) { child in
                     OutlineRow(node: child, total: total,
                                selection: $selection, expanded: $expanded,
-                               onRescan: onRescan)
+                               onRescan: onRescan, onShowHistory: onShowHistory)
                 }
             } label: {
                 rowLabel
@@ -427,8 +494,13 @@ struct OutlineRow: View {
                 .frame(width: 74, alignment: .trailing)
         }
         .tag(node)
+        // Double-click a folder to chart its children's history over time.
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            if node.isDirectory { onShowHistory(node) }
+        })
         .contextMenu {
             if node.isDirectory {
+                Button("Show History…") { onShowHistory(node) }
                 Button("Rescan This Folder") { onRescan(node) }
                 Divider()
             }

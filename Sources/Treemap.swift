@@ -185,6 +185,7 @@ struct TreemapView: View {
     @Binding var selection: FileNode?
     var onDrill: (FileNode) -> Void
     var onRescan: (FileNode) -> Void
+    var onShowHistory: (FileNode) -> Void
 
     @State private var tiles: [TreemapTile] = []
     @State private var hovered: FileNode?
@@ -232,6 +233,12 @@ struct TreemapView: View {
                 // Acts on the tile under the cursor (set by hover as you move to
                 // right-click it).
                 if let target = hovered {
+                    if target.isDirectory {
+                        Button("Show History…") {
+                            selection = target
+                            onShowHistory(target)
+                        }
+                    }
                     Button("Reveal in Finder") {
                         selection = target
                         NSWorkspace.shared.activateFileViewerSelecting([target.url])
