@@ -16,18 +16,20 @@ struct TreemapTile: Identifiable {
 /// parent's rectangle recursively, so several levels of the hierarchy are
 /// visible at once.
 enum TreemapLayout {
-    static let maxDepth = 4                 // number of nested layers to draw
     static let headerHeight: CGFloat = 15   // strip reserved for a folder's label
     static let minNestSide: CGFloat = 46    // don't nest into rects smaller than this
 
-    static func tiles(for node: FileNode, in bounds: CGRect) -> [TreemapTile] {
+    static func tiles(for node: FileNode, in bounds: CGRect,
+                      maxDepth: Int) -> [TreemapTile] {
         var out: [TreemapTile] = []
-        layout(childrenOf: node, in: bounds, depth: 0, into: &out)
+        layout(childrenOf: node, in: bounds, depth: 0,
+               maxDepth: max(1, maxDepth), into: &out)
         return out
     }
 
     private static func layout(childrenOf node: FileNode, in bounds: CGRect,
-                               depth: Int, into out: inout [TreemapTile]) {
+                               depth: Int, maxDepth: Int,
+                               into out: inout [TreemapTile]) {
         guard depth < maxDepth, node.size > 0,
               let children = node.children else { return }
         let items = children.filter { $0.size > 0 }
@@ -44,7 +46,8 @@ enum TreemapLayout {
                 && rect.width > minNestSide && rect.height > minNestSide
             out.append(TreemapTile(node: child, rect: rect, depth: depth, isLeaf: !nest, color: color))
             if nest {
-                layout(childrenOf: child, in: innerRect(rect), depth: depth + 1, into: &out)
+                layout(childrenOf: child, in: innerRect(rect), depth: depth + 1,
+                       maxDepth: maxDepth, into: &out)
             }
         }
     }
@@ -190,10 +193,12 @@ struct TreemapView: View {
     @State private var tiles: [TreemapTile] = []
     @State private var hovered: FileNode?
     @State private var hoverPoint: CGPoint = .zero
+    @AppStorage(AppSettings.treemapDepthKey)
+    private var maxDepth = AppSettings.defaultTreemapDepth
 
     var body: some View {
         GeometryReader { geo in
-            let key = "\(node.path)|\(node.size)|\(Int(geo.size.width))x\(Int(geo.size.height))"
+            let key = "\(node.path)|\(node.size)|\(Int(geo.size.width))x\(Int(geo.size.height))|\(maxDepth)"
             ZStack(alignment: .topLeading) {
                 Canvas { ctx, _ in draw(ctx) }
 
@@ -251,9 +256,13 @@ struct TreemapView: View {
                     }
                 }
             }
-            .onAppear { tiles = TreemapLayout.tiles(for: node, in: bounds(geo.size)) }
+            .onAppear {
+                tiles = TreemapLayout.tiles(for: node, in: bounds(geo.size),
+                                            maxDepth: maxDepth)
+            }
             .onChange(of: key) {
-                tiles = TreemapLayout.tiles(for: node, in: bounds(geo.size))
+                tiles = TreemapLayout.tiles(for: node, in: bounds(geo.size),
+                                            maxDepth: maxDepth)
             }
         }
     }

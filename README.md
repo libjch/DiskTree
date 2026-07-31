@@ -13,7 +13,8 @@ on your Mac.
 - Shows allocated-on-disk sizes in a tree and nested treemap
 - Streams partial results during large scans
 - Reveals selected files and folders in Finder
-- Re-scans individual folders and charts scan history
+- Re-scans individual folders and charts interactive drill-down scan history
+- Configures treemap and history recursion depth in Settings
 - Avoids following symbolic links and duplicate directory inodes
 - Restores the latest scan on launch
 
@@ -50,6 +51,22 @@ Run all local checks with:
 ./check.sh
 ```
 
+## History charts
+
+Double-click a folder in the outline, or choose **Show History** from a folder's
+context menu, to chart how its contents changed across archived scans. Click a
+colored directory band or its legend entry to drill into that folder; use the
+breadcrumb or back button to return.
+
+The chart reads the small history index first, fixing the complete date range on
+the X-axis. It then loads archived snapshots newest-to-oldest and updates the
+colored areas after each snapshot, with progress shown at the bottom of the
+sheet. This keeps the chart responsive even when individual scan archives are
+large.
+
+Use **DiskTree → Settings…** to change the nested treemap depth (default 5) and
+history folder depth (default 2). Both settings persist between launches.
+
 ## Full Disk Access
 
 macOS protects parts of the disk. For a complete scan, add the built or installed
@@ -84,6 +101,7 @@ again.
 | `Sources/Treemap.swift` | Treemap layout, rendering, and colors |
 | `Sources/ContentView.swift` | Main window and user actions |
 | `Sources/HistoryChart.swift` | Historical size chart |
+| `Sources/AppSettings.swift` | Persisted visualization settings |
 | `Sources/FullDiskAccess.swift` | Permission detection and guidance |
 | `build.sh` | Strict Universal 2 build |
 | `notarize.sh` | Developer ID signing and Apple notarization |

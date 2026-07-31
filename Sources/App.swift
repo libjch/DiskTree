@@ -10,5 +10,9 @@ struct DiskTreeApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            SettingsView()
+        }
     }
 }

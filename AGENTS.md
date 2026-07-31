@@ -24,12 +24,13 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
 | File | Responsibility |
 |---|---|
 | `App.swift` | App entry point |
+| `AppSettings.swift` | Persisted treemap/history depth settings + Settings UI |
 | `ContentView.swift` | Main window: toolbar, outline, treemap host, actions, disk picker, history sheet |
 | `Scanner.swift` | Parallel scan engine (worker pool). Inode dedup + single-volume confinement. |
-| `ScanStore.swift` | Persistence + append-only history archive (custom binary format, LZFSE). `folderHistory()` for the chart. |
+| `ScanStore.swift` | Persistence + append-only history archive (custom binary format, LZFSE). Per-snapshot history loading for progressive charts. |
 | `FileNode.swift` | Tree model (path-based identity) + byte formatting |
-| `Treemap.swift` | Nested squarified treemap + `NodePalette` (shared colors), `TreemapLayout.maxDepth` |
-| `HistoryChart.swift` | Stacked-area history chart (Swift Charts) |
+| `Treemap.swift` | Nested squarified treemap + `NodePalette` (shared colors); depth comes from `AppSettings`. |
+| `HistoryChart.swift` | Progressive stacked-area history chart, drill-down, breadcrumb/back navigation |
 | `FullDiskAccess.swift` | FDA detection + guidance |
 
 ## CRITICAL RULES — read before running anything
@@ -52,29 +53,13 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
 - `DISKTREE_INSTALL=1` — copy build to /Applications.
 - `notarize.sh`: `DISKTREE_NOTARY_PROFILE`, `DISKTREE_SIGNING_IDENTITY`, `DISKTREE_SITE_DOWNLOADS`.
 
-## Current working-tree state (uncommitted, on `main`)
-These 6 files have unstaged edits from the latest session, **not yet committed**:
-`ContentView.swift`, `Scanner.swift`, `ScanStore.swift`, `Treemap.swift`,
-`HistoryChart.swift`, `README.md`. They add, since the last commit
-(`0eaa891 Distribute DiskTree as a notarized DMG`):
-- Nested treemap (4 layers) + shared hierarchical palette (`NodePalette`).
-- Scan persistence + append-only history; **folder-scoped** stacked-area history
-  chart (double-click an outline folder, or right-click → "Show History").
-- Consolidated toolbar (Scan Disk / Choose Folder / Refresh / History; Reveal +
-  Trash on the right).
-- Single-volume scan confinement + a **disk picker** when multiple volumes are
-  mounted.
-- `DISKTREE_DATA_DIR` safety override.
-
-Consider committing before large new work so changes are isolated.
-
-## Next planned task (requested, not started)
-1. **Interactive drill-down inside the "Show History" popup** — let the user click
-   a folder / colored band / legend entry in `HistoryChartView` to re-scope the
-   chart to that folder without closing it (add breadcrumb/back). Data is ready via
-   `ScanStore.folderHistory(rootPath:folderPath:)`.
-2. **Settings menu for recursion depth** (persist in UserDefaults):
-   - Treemap depth — currently hard-coded `TreemapLayout.maxDepth = 4`; make
-     configurable (user wants default ~5).
-   - History chart depth — currently only the folder's **direct children** (1
-     level); make configurable, default 2.
+## Current implementation notes
+- History sheets support in-place drill-down through directory bands and a
+  clickable legend, plus breadcrumb/back navigation.
+- History loading is progressive: read the index first to fix all X-axis dates,
+  then decode archives newest-to-oldest and update after every snapshot.
+- Category identity uses absolute paths, preventing same-named folders from
+  merging; colors remain stable while older snapshots arrive.
+- Visualization depths persist in UserDefaults. Defaults: treemap 5, history 2.
+- `ScanStore.folderHistorySample(entry:folderPath:depth:)` is the per-archive API
+  used by the progressive loader. Keep archive decoding off the main actor.

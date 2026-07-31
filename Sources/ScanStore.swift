@@ -1,9 +1,24 @@
 import Foundation
 
-/// A top-level folder's size at scan time (for the history chart).
-struct CategorySize: Codable, Hashable, Sendable {
+/// One non-overlapping category in a folder's history chart.
+struct CategorySize: Codable, Hashable, Identifiable, Sendable {
     let name: String
     let size: Int64
+    /// Absolute path and node type make directory categories drillable. Both are
+    /// optional so history indexes written by older versions still decode.
+    let path: String?
+    let isDirectory: Bool?
+
+    init(name: String, size: Int64, path: String? = nil, isDirectory: Bool? = nil) {
+        self.name = name
+        self.size = size
+        self.path = path
+        self.isDirectory = isDirectory
+    }
+
+    var identity: String { path ?? name }
+    var id: String { identity }
+    var canDrillDown: Bool { isDirectory == true && path != nil }
 }
 
 /// One folder's child breakdown at a point in time (for the history chart).
@@ -13,14 +28,14 @@ struct HistorySample: Sendable {
 }
 
 /// One archived scan in the (append-only) history.
-struct ScanHistoryEntry: Codable, Identifiable {
+struct ScanHistoryEntry: Codable, Identifiable, Sendable {
     let file: String        // filename within the history directory
     let date: Date
     let rootPath: String
     let totalSize: Int64
     let fileCount: Int
-    /// Top-level breakdown, stored inline so the history chart doesn't need to
-    /// decode full archives. Optional for backward compatibility.
+    /// Top-level breakdown, stored inline for backward compatibility and the
+    /// one-level fast path.
     var categories: [CategorySize]?
     var id: String { file }
 }
@@ -83,7 +98,7 @@ enum ScanStore {
         let name = "\(stamp)_\(UUID().uuidString)_\(sanitize(rootPath)).dtscan"
         let entry = ScanHistoryEntry(file: name, date: date, rootPath: rootPath,
                                      totalSize: root.size, fileCount: root.fileCount,
-                                     categories: topCategories(of: root))
+                                     categories: categories(of: root, depth: 1))
         // Update the (small) index right away so the history is immediately
         // available; write the heavy tree archive off-main.
         var index = readIndex()
@@ -97,13 +112,42 @@ enum ScanStore {
         }
     }
 
-    /// Top-level folders (largest first, capped with an "Other" bucket) for the
-    /// history chart.
-    private static func topCategories(of root: FileNode) -> [CategorySize] {
-        let kids = (root.children ?? []).filter { $0.size > 0 }.sorted { $0.size > $1.size }
-        let capped = kids.prefix(14).map { CategorySize(name: $0.name, size: $0.size) }
-        let rest = kids.dropFirst(14).reduce(Int64(0)) { $0 + $1.size }
-        return rest > 0 ? capped + [CategorySize(name: "Other", size: rest)] : Array(capped)
+    /// A non-overlapping frontier up to `depth` levels below `root`, largest
+    /// first and capped with an "Other" bucket. Descending replaces a folder
+    /// with its children, so category sizes still add up to the folder total.
+    private static func categories(of root: FileNode, depth: Int) -> [CategorySize] {
+        var nodes: [FileNode] = []
+        collectCategories(from: root, remainingDepth: max(1, depth), into: &nodes)
+        nodes.sort { $0.size > $1.size }
+
+        let capped = nodes.prefix(14).map { node in
+            CategorySize(name: relativePath(of: node, below: root),
+                         size: node.size, path: node.path,
+                         isDirectory: node.isDirectory)
+        }
+        let rest = nodes.dropFirst(14).reduce(Int64(0)) { $0 + $1.size }
+        return rest > 0
+            ? capped + [CategorySize(name: "Other", size: rest)]
+            : Array(capped)
+    }
+
+    private static func collectCategories(from node: FileNode, remainingDepth: Int,
+                                          into result: inout [FileNode]) {
+        for child in (node.children ?? []).filter({ $0.size > 0 }) {
+            let children = child.children?.contains { $0.size > 0 } ?? false
+            if remainingDepth > 1 && child.isDirectory && children {
+                collectCategories(from: child, remainingDepth: remainingDepth - 1,
+                                  into: &result)
+            } else {
+                result.append(child)
+            }
+        }
+    }
+
+    private static func relativePath(of node: FileNode, below root: FileNode) -> String {
+        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard node.path.hasPrefix(prefix) else { return node.name }
+        return String(node.path.dropFirst(prefix.count))
     }
 
     /// All archived scans, newest first.
@@ -123,19 +167,43 @@ enum ScanStore {
         return decodeTree(unpacked)
     }
 
-    /// Child breakdown of one folder across the archived scans of `rootPath`,
-    /// oldest first. For the scan root itself this uses the fast inline
-    /// categories; for a deeper folder it decodes each archive and navigates to
-    /// it — so call this off the main thread.
-    static func folderHistory(rootPath: String, folderPath: String) -> [HistorySample] {
-        let entries = readIndex().filter { $0.rootPath == rootPath }.sorted { $0.date < $1.date }
-        if folderPath == rootPath {
-            return entries.map { HistorySample(date: $0.date, categories: $0.categories ?? []) }
+    /// Load one point in a folder's history. Keeping this operation per-entry
+    /// lets the UI render the newest snapshot immediately and add older points
+    /// progressively instead of waiting for the entire archive.
+    static func folderHistorySample(entry: ScanHistoryEntry, folderPath: String,
+                                    depth: Int) -> HistorySample? {
+        if folderPath == entry.rootPath && depth == 1,
+           let inline = entry.categories,
+           inline.allSatisfy({ categoryHasPathMetadata($0) }) {
+            return HistorySample(date: entry.date, categories: inline)
         }
-        return entries.compactMap { entry in
-            guard let (root, date) = loadArchived(entry),
-                  let node = findNode(root, path: folderPath) else { return nil }
-            return HistorySample(date: date, categories: topCategories(of: node))
+        guard let (root, date) = loadArchived(entry),
+              let node = findNode(root, path: folderPath) else { return nil }
+        return HistorySample(date: date, categories: categories(of: node, depth: depth))
+    }
+
+    private static func categoryHasPathMetadata(_ category: CategorySize) -> Bool {
+        (category.path != nil && category.isDirectory != nil) || category.name == "Other"
+    }
+
+    /// Child breakdown of one folder across the archived scans of `rootPath`,
+    /// oldest first. A one-layer root chart can use the fast inline categories
+    /// when every entry has modern path metadata. Other cases decode each
+    /// archive and navigate to the folder, so call this off the main thread.
+    static func folderHistory(rootPath: String, folderPath: String,
+                              depth: Int) -> [HistorySample] {
+        let entries = readIndex().filter { $0.rootPath == rootPath }.sorted { $0.date < $1.date }
+        if folderPath == rootPath && depth == 1,
+           entries.allSatisfy({ entry in
+               guard let categories = entry.categories else { return false }
+               return categories.allSatisfy { categoryHasPathMetadata($0) }
+           }) {
+            return entries.map {
+                HistorySample(date: $0.date, categories: $0.categories ?? [])
+            }
+        }
+        return entries.compactMap {
+            folderHistorySample(entry: $0, folderPath: folderPath, depth: depth)
         }
     }
 
