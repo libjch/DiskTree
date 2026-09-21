@@ -25,6 +25,7 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
 |---|---|
 | `App.swift` | App entry point |
 | `AppSettings.swift` | Persisted treemap/history depth settings + Settings UI |
+| `WeeklyScanScheduler.swift` | `SMAppService` registration/status for weekly scans |
 | `ContentView.swift` | Main window: toolbar, outline, treemap host, actions, disk picker, history sheet |
 | `Scanner.swift` | Parallel scan engine (worker pool). Inode dedup + single-volume confinement. |
 | `ScanStore.swift` | Persistence + append-only history archive (custom binary format, LZFSE). Per-snapshot history loading for progressive charts. |
@@ -32,6 +33,12 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
 | `Treemap.swift` | Nested squarified treemap + `NodePalette` (shared colors); depth comes from `AppSettings`. |
 | `HistoryChart.swift` | Progressive stacked-area history chart, drill-down, breadcrumb/back navigation |
 | `FullDiskAccess.swift` | FDA detection + guidance |
+| `DiskAccess.swift` | Foundation-only FDA probe shared with the helper |
+| `ScanExecutionLock.swift` | Cross-process exclusion for GUI/helper scans |
+
+The headless helper entry point is `Helper/ScheduledScanMain.swift`; its launchd
+plist is `Resources/com.libjch.disktree.weekly-scan.plist`. `build.sh` creates and
+signs it at `DiskTree.app/Contents/Helpers/DiskTreeWeeklyScan`.
 
 ## CRITICAL RULES — read before running anything
 1. **Never delete or clear `~/Library/Application Support/DiskTree/`** (or its
@@ -47,10 +54,14 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
    device IDs, decode round-trips) and ask the user to confirm actual
    clicks/hover/right-click/double-click interactions.
 4. Never commit certs/keys (`.cer/.p12/.provisionprofile` are gitignored).
+5. The scheduled helper normally scans `/`. For deterministic testing, set both
+   `DISKTREE_DATA_DIR` and `DISKTREE_SCHEDULED_SCAN_ROOT` to throwaway paths.
 
 ## Handy test env vars
 - `DISKTREE_DATA_DIR` — redirect all persistence (see rule 2).
 - `DISKTREE_INSTALL=1` — copy build to /Applications.
+- `DISKTREE_SCHEDULED_SCAN_ROOT` — helper test root; honored only when
+  `DISKTREE_DATA_DIR` is also set.
 - `notarize.sh`: `DISKTREE_NOTARY_PROFILE`, `DISKTREE_SIGNING_IDENTITY`, `DISKTREE_SITE_DOWNLOADS`.
 
 ## Current implementation notes
@@ -63,3 +74,11 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
 - Visualization depths persist in UserDefaults. Defaults: treemap 5, history 2.
 - `ScanStore.folderHistorySample(entry:folderPath:depth:)` is the per-archive API
   used by the progressive loader. Keep archive decoding off the main actor.
+- Weekly automatic scans use a bundled LaunchAgent registered by the user in
+  Settings. Schedule: Monday 08:00; target: startup volume `/`; external volumes
+  are excluded by `ScanEngine`'s device-ID confinement.
+- The helper must finish synchronous persistence before exiting. Keep its nested
+  signing step before the outer app signing in both `build.sh` and `notarize.sh`.
+- `ScanEngine.maybeSnapshotLocked()` must return immediately when `onProgress` is
+  nil. The helper has no UI consumer; deep-copying a multi-million-node tree every
+  two seconds made the first scheduled scan run for more than a day.

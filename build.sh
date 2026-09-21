@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 APP="DiskTree.app"
 BIN="DiskTree"
+HELPER_BIN="DiskTreeWeeklyScan"
 CONTENTS="$APP/Contents"
 BUILD_TMP="$(mktemp -d "${TMPDIR:-/tmp}/disktree-build.XXXXXX")"
 trap 'rm -rf "$BUILD_TMP"' EXIT
@@ -18,7 +19,8 @@ fi
 
 echo "› Compiling Swift sources…"
 rm -rf "$APP"
-mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/Helpers" \
+    "$CONTENTS/Library/LaunchAgents"
 
 for ARCH in "${BUILD_ARCHS[@]}"; do
     case "$ARCH" in
@@ -34,17 +36,34 @@ for ARCH in "${BUILD_ARCHS[@]}"; do
         -strict-concurrency=complete -warnings-as-errors \
         -target "$ARCH-apple-macos14.0" \
         -framework SwiftUI -framework AppKit -framework Combine \
+        -framework ServiceManagement \
         Sources/*.swift \
         -o "$BUILD_TMP/$BIN-$ARCH"
+
+    swiftc -O -parse-as-library \
+        -swift-version 6 \
+        -strict-concurrency=complete -warnings-as-errors \
+        -target "$ARCH-apple-macos14.0" \
+        -framework Combine \
+        Sources/FileNode.swift Sources/DiskAccess.swift \
+        Sources/ScanExecutionLock.swift Sources/ScanStore.swift \
+        Sources/Scanner.swift Helper/ScheduledScanMain.swift \
+        -o "$BUILD_TMP/$HELPER_BIN-$ARCH"
 done
 
 if [ "${#BUILD_ARCHS[@]}" -eq 1 ]; then
     cp "$BUILD_TMP/$BIN-${BUILD_ARCHS[0]}" "$CONTENTS/MacOS/$BIN"
+    cp "$BUILD_TMP/$HELPER_BIN-${BUILD_ARCHS[0]}" "$CONTENTS/Helpers/$HELPER_BIN"
 else
     lipo -create "${BUILD_ARCHS[@]/#/$BUILD_TMP/$BIN-}" -output "$CONTENTS/MacOS/$BIN"
+    lipo -create "${BUILD_ARCHS[@]/#/$BUILD_TMP/$HELPER_BIN-}" \
+        -output "$CONTENTS/Helpers/$HELPER_BIN"
 fi
 
 cp Info.plist "$CONTENTS/Info.plist"
+cp Resources/com.libjch.disktree.weekly-scan.plist \
+    "$CONTENTS/Library/LaunchAgents/com.libjch.disktree.weekly-scan.plist"
+plutil -lint "$CONTENTS/Library/LaunchAgents/com.libjch.disktree.weekly-scan.plist"
 
 # Stamp the build date so the app can show which build is running.
 BUILD_DATE="$(date '+%Y-%m-%d %H:%M')"
@@ -64,11 +83,14 @@ IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
 
 if [ -n "$IDENTITY" ]; then
     echo "› Code signing with: $IDENTITY"
+    codesign --force --sign "$IDENTITY" "$CONTENTS/Helpers/$HELPER_BIN"
     codesign --force --sign "$IDENTITY" "$APP"
 else
     echo "› No stable identity found — ad-hoc signing (FDA grant won't persist across rebuilds)…"
+    codesign --force --sign - "$CONTENTS/Helpers/$HELPER_BIN"
     codesign --force --sign - "$APP"
 fi
+codesign --verify --strict --verbose=2 "$CONTENTS/Helpers/$HELPER_BIN"
 codesign --verify --strict --verbose=2 "$APP"
 
 echo "✓ Built $APP"

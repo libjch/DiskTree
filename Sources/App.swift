@@ -5,6 +5,7 @@ struct DiskTreeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .task { await WeeklyScanScheduler.refreshRegistrationIfNeeded() }
         }
         .windowStyle(.titleBar)
         .commands {

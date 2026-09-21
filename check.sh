@@ -14,7 +14,9 @@ echo "› Building with strict Swift concurrency checks…"
 
 echo "› Validating bundle and executable…"
 plutil -lint DiskTree.app/Contents/Info.plist
+plutil -lint DiskTree.app/Contents/Library/LaunchAgents/com.libjch.disktree.weekly-scan.plist
 codesign --verify --deep --strict --verbose=2 DiskTree.app
 file DiskTree.app/Contents/MacOS/DiskTree
+file DiskTree.app/Contents/Helpers/DiskTreeWeeklyScan
 
 echo "✓ All checks passed"

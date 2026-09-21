@@ -15,6 +15,7 @@ on your Mac.
 - Reveals selected files and folders in Finder
 - Re-scans individual folders and charts interactive drill-down scan history
 - Configures treemap and history recursion depth in Settings
+- Optionally scans the startup disk every Monday morning in the background
 - Avoids following symbolic links and duplicate directory inodes
 - Restores the latest scan on launch
 
@@ -67,6 +68,23 @@ large.
 Use **DiskTree → Settings…** to change the nested treemap depth (default 5) and
 history folder depth (default 2). Both settings persist between launches.
 
+## Automatic weekly scans
+
+Enable **Scan the startup disk weekly** in **DiskTree → Settings…** to register
+DiskTree's bundled background helper. macOS runs it every Monday at 08:00. If
+the Mac is asleep, the scan starts after it wakes; if it is powered off, that
+week's occurrence is skipped.
+
+The helper scans `/` and uses the same device-ID confinement as manual scans, so
+it never descends into external mounted volumes. It requires Full Disk Access
+and may also need approval under **System Settings → General → Login Items &
+Extensions**. Settings shows the latest automatic scan result.
+
+DiskTree uses an embedded, signed LaunchAgent registered through `SMAppService`.
+Manual and automatic scans share a cross-process lock and cannot run at the same
+time. Headless scans skip the expensive progressive UI snapshots used by the
+foreground app.
+
 ## Full Disk Access
 
 macOS protects parts of the disk. For a complete scan, add the built or installed
@@ -102,6 +120,8 @@ again.
 | `Sources/ContentView.swift` | Main window and user actions |
 | `Sources/HistoryChart.swift` | Historical size chart |
 | `Sources/AppSettings.swift` | Persisted visualization settings |
+| `Sources/WeeklyScanScheduler.swift` | Background-helper registration and status |
+| `Helper/ScheduledScanMain.swift` | Headless weekly scanner entry point |
 | `Sources/FullDiskAccess.swift` | Permission detection and guidance |
 | `build.sh` | Strict Universal 2 build |
 | `notarize.sh` | Developer ID signing and Apple notarization |

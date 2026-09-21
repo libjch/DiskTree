@@ -27,6 +27,22 @@ struct HistorySample: Sendable {
     let categories: [CategorySize]
 }
 
+enum ScheduledScanOutcome: String, Codable, Sendable {
+    case running
+    case succeeded
+    case failed
+}
+
+struct ScheduledScanStatus: Codable, Sendable {
+    let startedAt: Date
+    let finishedAt: Date?
+    let outcome: ScheduledScanOutcome
+    let message: String
+    /// Present for running scans written by current helpers. Optional so status
+    /// files from earlier builds remain decodable.
+    let processID: Int32?
+}
+
 /// One archived scan in the (append-only) history.
 struct ScanHistoryEntry: Codable, Identifiable, Sendable {
     let file: String        // filename within the history directory
@@ -56,7 +72,7 @@ enum ScanStore {
 
     // MARK: Locations
 
-    private static var baseDir: URL {
+    static var dataDirectory: URL {
         // Tests/dev can redirect all persistence to a throwaway directory via
         // DISKTREE_DATA_DIR, so nothing ever needs to delete the real one.
         let dir: URL
@@ -70,13 +86,16 @@ enum ScanStore {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
-    private static var currentURL: URL { baseDir.appendingPathComponent("lastScan.dtscan") }
+    private static var currentURL: URL { dataDirectory.appendingPathComponent("lastScan.dtscan") }
     private static var historyDir: URL {
-        let dir = baseDir.appendingPathComponent("history", isDirectory: true)
+        let dir = dataDirectory.appendingPathComponent("history", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
     private static var indexURL: URL { historyDir.appendingPathComponent("index.json") }
+    private static var scheduledStatusURL: URL {
+        dataDirectory.appendingPathComponent("scheduled-scan-status.json")
+    }
 
     // MARK: Save current (fast-launch copy)
 
@@ -110,6 +129,34 @@ enum ScanStore {
             let payload = pack(encoded)
             try? payload.write(to: historyDir.appendingPathComponent(name), options: .atomic)
         }
+    }
+
+    /// Persist a completed helper scan before the short-lived helper exits.
+    /// The archive file is committed before its index entry becomes visible.
+    static func saveAndArchiveSynchronously(_ root: FileNode, date: Date) throws {
+        let rootPath = root.path
+        let stamp = Int64(date.timeIntervalSince1970 * 1_000)
+        let name = "\(stamp)_\(UUID().uuidString)_\(sanitize(rootPath)).dtscan"
+        let entry = ScanHistoryEntry(file: name, date: date, rootPath: rootPath,
+                                     totalSize: root.size, fileCount: root.fileCount,
+                                     categories: categories(of: root, depth: 1))
+        let payload = pack(encodeTree(rootPath: rootPath, date: date, root: root))
+
+        try payload.write(to: currentURL, options: .atomic)
+        try payload.write(to: historyDir.appendingPathComponent(name), options: .atomic)
+        var index = readIndex()
+        index.append(entry)
+        try writeIndexThrowing(index)
+    }
+
+    static func scheduledScanStatus() -> ScheduledScanStatus? {
+        guard let data = try? Data(contentsOf: scheduledStatusURL) else { return nil }
+        return try? JSONDecoder().decode(ScheduledScanStatus.self, from: data)
+    }
+
+    static func writeScheduledScanStatus(_ status: ScheduledScanStatus) {
+        guard let data = try? JSONEncoder().encode(status) else { return }
+        try? data.write(to: scheduledStatusURL, options: .atomic)
     }
 
     /// A non-overlapping frontier up to `depth` levels below `root`, largest
@@ -415,9 +462,12 @@ enum ScanStore {
     }
 
     private static func writeIndex(_ index: [ScanHistoryEntry]) {
-        if let data = try? JSONEncoder().encode(index) {
-            try? data.write(to: indexURL, options: .atomic)
-        }
+        try? writeIndexThrowing(index)
+    }
+
+    private static func writeIndexThrowing(_ index: [ScanHistoryEntry]) throws {
+        let data = try JSONEncoder().encode(index)
+        try data.write(to: indexURL, options: .atomic)
     }
 
     private static func sanitize(_ path: String) -> String {

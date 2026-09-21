@@ -57,12 +57,20 @@ final class Scanner: ObservableObject {
 
     private var task: Task<Void, Never>?
     private var engine: ScanEngine?
+    private var executionLock: ScanExecutionLock?
+    private var subtreeExecutionLock: ScanExecutionLock?
     /// Bumped whenever a scan is started or cancelled, so a superseded scan's
     /// late UI updates can be recognized and dropped.
     private var generation = 0
 
     func scan(_ url: URL) {
         cancel()                 // supersede any running scan (bumps generation)
+        guard executionLock == nil,
+              let runLock = ScanExecutionLock.acquire(wait: false) else {
+            errorMessage = "Another DiskTree scan is still running. Try again when it finishes."
+            return
+        }
+        executionLock = runLock
         let gen = generation
         isScanning = true
         scannedItems = 0
@@ -81,7 +89,9 @@ final class Scanner: ObservableObject {
         task = Task.detached(priority: .userInitiated) {
             let result = engine.run()
             await MainActor.run { [weak self] in
-                guard let self, gen == self.generation else { return }
+                guard let self else { return }
+                if self.executionLock === runLock { self.executionLock = nil }
+                guard gen == self.generation else { return }
                 self.root = result.root
                 self.partialRoot = nil
                 self.scannedItems = result.count
@@ -137,6 +147,11 @@ final class Scanner: ObservableObject {
     /// without re-scanning everything.
     func rescanSubtree(_ target: FileNode) {
         guard !isScanning, rescanningPath == nil, target.isDirectory else { return }
+        guard let runLock = ScanExecutionLock.acquire(wait: false) else {
+            errorMessage = "A scheduled scan is running. Try again when it finishes."
+            return
+        }
+        subtreeExecutionLock = runLock
         let url = target.url
         let gen = generation
         rescanningPath = url.path
@@ -146,7 +161,12 @@ final class Scanner: ObservableObject {
             let result = engine.run()
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                defer { self.rescanningPath = nil }
+                defer {
+                    self.rescanningPath = nil
+                    if self.subtreeExecutionLock === runLock {
+                        self.subtreeExecutionLock = nil
+                    }
+                }
                 // Bail if a full scan started/finished meanwhile (tree replaced).
                 guard gen == self.generation else { return }
                 if !FileManager.default.fileExists(atPath: target.path) {
@@ -224,7 +244,7 @@ final class Scanner: ObservableObject {
 /// part) happens entirely outside the lock.
 // All mutable engine state and its live tree are protected by `cond`. The final
 // result and snapshots are no longer mutated by the engine after publication.
-private final class ScanEngine: @unchecked Sendable {
+final class ScanEngine: @unchecked Sendable {
     struct Result: Sendable { let root: FileNode?; let count: Int }
 
     let rootURL: URL
@@ -386,12 +406,15 @@ private final class ScanEngine: @unchecked Sendable {
     /// Called while holding `cond`. Since every assigned `children` array is
     /// immutable thereafter and we hold the lock, the tree is stable to copy.
     private func maybeSnapshotLocked() {
+        // The headless weekly helper has no progress consumer. Avoid an O(tree
+        // size) deep copy every two seconds when there is nobody to receive it.
+        guard let onProgress else { return }
         let now = Date()
         guard now.timeIntervalSince(lastSnapshot) >= snapshotInterval,
               let live = rootNode else { return }
         lastSnapshot = now
         let snap = deepCopySorted(live)
-        onProgress?(snap, counter, lastPath)
+        onProgress(snap, counter, lastPath)
     }
 
     /// Immutable, size-sorted copy of a subtree. Directory sizes/counts are

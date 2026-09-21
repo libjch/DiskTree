@@ -9,16 +9,7 @@ enum FullDiskAccess {
     /// Probe a file that is only readable with Full Disk Access. If the read
     /// succeeds, FDA is granted. Uses the TCC database, which always exists.
     static var isGranted: Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let probe = home.appendingPathComponent("Library/Application Support/com.apple.TCC/TCC.db")
-        guard FileManager.default.fileExists(atPath: probe.path) else {
-            // Path missing is unusual; assume we can't confirm access.
-            return false
-        }
-        // Opening the handle for reading succeeds only with Full Disk Access.
-        guard let fh = try? FileHandle(forReadingFrom: probe) else { return false }
-        try? fh.close()
-        return true
+        DiskAccess.hasFullDiskAccess
     }
 
     /// Open System Settings directly at Privacy & Security › Full Disk Access.

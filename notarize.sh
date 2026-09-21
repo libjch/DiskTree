@@ -11,6 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="DiskTree.app"
+HELPER="DiskTree.app/Contents/Helpers/DiskTreeWeeklyScan"
 DMG="DiskTree.dmg"
 VOLUME_NAME="DiskTree"
 PROFILE="${DISKTREE_NOTARY_PROFILE:-DiskTree}"
@@ -36,7 +37,9 @@ fi
 
 # 2. Sign with the hardened runtime + a secure timestamp (required for notarization).
 echo "› Signing: $IDENTITY (hardened runtime)"
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$HELPER"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+codesign --verify --strict --verbose=2 "$HELPER"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 # 3. Build a compressed disk image with the standard Applications shortcut.
