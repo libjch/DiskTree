@@ -112,6 +112,7 @@ enum ScanStore {
 
     @MainActor
     static func archive(_ root: FileNode, date: Date) {
+        HistoryBackup.ensureBackup(dataDirectory: dataDirectory)
         let rootPath = root.path
         let stamp = Int64(date.timeIntervalSince1970 * 1_000)
         let name = "\(stamp)_\(UUID().uuidString)_\(sanitize(rootPath)).dtscan"
@@ -134,6 +135,7 @@ enum ScanStore {
     /// Persist a completed helper scan before the short-lived helper exits.
     /// The archive file is committed before its index entry becomes visible.
     static func saveAndArchiveSynchronously(_ root: FileNode, date: Date) throws {
+        HistoryBackup.ensureBackup(dataDirectory: dataDirectory)
         let rootPath = root.path
         let stamp = Int64(date.timeIntervalSince1970 * 1_000)
         let name = "\(stamp)_\(UUID().uuidString)_\(sanitize(rootPath)).dtscan"
