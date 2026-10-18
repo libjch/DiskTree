@@ -302,65 +302,72 @@ enum ScanStore {
         var out = Data()
         let (estimated, overflow) = root.fileCount.multipliedReportingOverflow(by: 24)
         if !overflow { out.reserveCapacity(estimated + 4096) }
-        out.append(contentsOf: [0x44, 0x54, 0x53, 0x31])           // "DTS1"
-        appendF64(date.timeIntervalSince1970, &out)
-        appendStr(rootPath, &out)
+        out.append(contentsOf: treeMagic)                          // "DTS1"
+        out.appendF64(date.timeIntervalSince1970)
+        out.appendString(rootPath)
         encodeNode(root, &out)
         return out
     }
 
     private static func encodeNode(_ n: FileNode, _ out: inout Data) {
-        appendStr(n.name, &out)
+        out.appendString(n.name)
         out.append(n.isDirectory ? 1 : 0)
-        appendI64(n.size, &out)
+        out.appendI64(n.size)
         let kids = n.children ?? []
-        appendI32(Int32(clamping: n.fileCount), &out)
-        appendI32(Int32(clamping: kids.count), &out)
+        out.appendI32(Int32(clamping: n.fileCount))
+        out.appendI32(Int32(clamping: kids.count))
         for c in kids { encodeNode(c, &out) }
     }
 
+    private static let treeMagic: [UInt8] = [0x44, 0x54, 0x53, 0x31]   // "DTS1"
+
+    /// Smallest possible encoded node (empty name, no children). Used to
+    /// reject corrupt child counts before reserving memory for them.
+    private static let minimumNodeBytes = 19
+
     private static func decodeTree(_ data: Data) -> (root: FileNode, date: Date)? {
-        var cursor = DecodeCursor(data)
-        guard cursor.readBytes(count: 4) == [0x44, 0x54, 0x53, 0x31],
-              let timestamp = cursor.readF64(),
-              timestamp.isFinite,
-              let rootPath = cursor.readString(),
-              !rootPath.isEmpty,
-              let root = decodeNode(&cursor, path: rootPath, parent: nil),
-              cursor.isAtEnd else { return nil }
-        let date = Date(timeIntervalSince1970: timestamp)
-        return (root, date)
+        data.withUnsafeBytes { raw -> (FileNode, Date)? in
+            var reader = ByteReader(raw)
+            guard reader.matches(magic: treeMagic),
+                  let timestamp = reader.readF64(),
+                  timestamp.isFinite,
+                  let rootPath = reader.readString(),
+                  !rootPath.isEmpty,
+                  let root = decodeNode(&reader, parentPath: nil, ownPath: rootPath,
+                                        parent: nil),
+                  reader.isAtEnd else { return nil }
+            return (root, Date(timeIntervalSince1970: timestamp))
+        }
     }
 
-    private static func decodeNode(_ cursor: inout DecodeCursor, path: String,
-                                   parent: FileNode?) -> FileNode? {
-        guard let name = cursor.readString(),
-              let directoryFlag = cursor.readByte(),
-              directoryFlag <= 1,
-              let size = cursor.readI64(),
-              size >= 0,
-              let rawFileCount = cursor.readI32(),
-              rawFileCount >= 0,
-              let rawChildCount = cursor.readI32(),
-              rawChildCount >= 0 else { return nil }
-        let isDir = directoryFlag == 1
-        let fileCount = Int(rawFileCount)
-        let childCount = Int(rawChildCount)
-        // Every encoded node needs at least 19 bytes. This both rejects corrupt
-        // counts and avoids reserving attacker-controlled amounts of memory.
-        guard childCount <= cursor.remaining / 19,
-              isDir || childCount == 0 else { return nil }
+    /// Decode one node. The root passes `ownPath`; every child derives its path
+    /// from its parent's and the name read here, so the name is materialized
+    /// exactly once.
+    private static func decodeNode(_ reader: inout ByteReader, parentPath: String?,
+                                   ownPath: String?, parent: FileNode?) -> FileNode? {
+        guard let header = readNodeHeader(&reader) else { return nil }
+        let name = reader.string(in: header.nameRange)
+        guard header.isDirectory || header.childCount == 0 else { return nil }
 
-        let node = FileNode(path: path, name: name, isDirectory: isDir)
-        node.size = size
-        node.fileCount = fileCount
+        let path: String
+        if let ownPath {
+            path = ownPath
+        } else if let parentPath {
+            path = (parentPath.hasSuffix("/") ? parentPath : parentPath + "/") + name
+        } else {
+            return nil
+        }
+
+        let node = FileNode(path: path, name: name, isDirectory: header.isDirectory)
+        node.size = header.size
+        node.fileCount = header.fileCount
         node.parent = parent
-        if isDir {
+        if header.isDirectory {
             var kids: [FileNode] = []
-            kids.reserveCapacity(childCount)
-            for _ in 0..<childCount {
-                guard let child = decodeChild(&cursor, parentPath: path, parent: node)
-                else { return nil }
+            kids.reserveCapacity(header.childCount)
+            for _ in 0..<header.childCount {
+                guard let child = decodeNode(&reader, parentPath: path, ownPath: nil,
+                                             parent: node) else { return nil }
                 kids.append(child)
             }
             node.children = kids
@@ -368,88 +375,30 @@ enum ScanStore {
         return node
     }
 
-    /// A child's path is parent + "/" + its name (read inside).
-    private static func decodeChild(_ cursor: inout DecodeCursor, parentPath: String,
-                                    parent: FileNode) -> FileNode? {
-        let start = cursor.index
-        guard let name = cursor.readString() else { return nil }
-        cursor.index = start
-        let separator = parentPath.hasSuffix("/") ? "" : "/"
-        return decodeNode(&cursor, path: parentPath + separator + name, parent: parent)
+    /// Fixed-size part of a node, with the name left in the buffer so callers
+    /// that are about to discard the node never allocate a `String` for it.
+    private struct NodeHeader {
+        let nameRange: Range<Int>
+        let isDirectory: Bool
+        let size: Int64
+        let fileCount: Int
+        let childCount: Int
     }
 
-    // MARK: Byte helpers
-
-    private static func appendStr(_ s: String, _ out: inout Data) {
-        let bytes = Array(s.utf8)
-        appendU16(UInt16(min(bytes.count, 0xFFFF)), &out)
-        out.append(contentsOf: bytes.prefix(0xFFFF))
-    }
-    private static func appendU16(_ v: UInt16, _ out: inout Data) {
-        out.append(UInt8(v & 0xFF)); out.append(UInt8(v >> 8))
-    }
-    private static func appendI32(_ v: Int32, _ out: inout Data) {
-        var le = v.littleEndian; withUnsafeBytes(of: &le) { out.append(contentsOf: $0) }
-    }
-    private static func appendI64(_ v: Int64, _ out: inout Data) {
-        var le = v.littleEndian; withUnsafeBytes(of: &le) { out.append(contentsOf: $0) }
-    }
-    private static func appendF64(_ v: Double, _ out: inout Data) {
-        appendI64(Int64(bitPattern: v.bitPattern), &out)
-    }
-
-    private struct DecodeCursor {
-        private let bytes: [UInt8]
-        fileprivate var index = 0
-
-        init(_ data: Data) {
-            bytes = Array(data)
-        }
-
-        var remaining: Int { bytes.count - index }
-        var isAtEnd: Bool { index == bytes.count }
-
-        mutating func readByte() -> UInt8? {
-            guard remaining >= 1 else { return nil }
-            defer { index += 1 }
-            return bytes[index]
-        }
-
-        mutating func readBytes(count: Int) -> [UInt8]? {
-            guard count >= 0, remaining >= count else { return nil }
-            defer { index += count }
-            return Array(bytes[index..<(index + count)])
-        }
-
-        mutating func readString() -> String? {
-            guard let lengthBytes = readBytes(count: 2) else { return nil }
-            let count = Int(lengthBytes[0]) | Int(lengthBytes[1]) << 8
-            guard let value = readBytes(count: count) else { return nil }
-            return String(bytes: value, encoding: .utf8)
-        }
-
-        mutating func readI32() -> Int32? {
-            guard let value = readBytes(count: 4) else { return nil }
-            var bits: UInt32 = 0
-            for offset in 0..<4 {
-                bits |= UInt32(value[offset]) << UInt32(8 * offset)
-            }
-            return Int32(bitPattern: bits)
-        }
-
-        mutating func readI64() -> Int64? {
-            guard let value = readBytes(count: 8) else { return nil }
-            var bits: UInt64 = 0
-            for offset in 0..<8 {
-                bits |= UInt64(value[offset]) << UInt64(8 * offset)
-            }
-            return Int64(bitPattern: bits)
-        }
-
-        mutating func readF64() -> Double? {
-            guard let value = readI64() else { return nil }
-            return Double(bitPattern: UInt64(bitPattern: value))
-        }
+    private static func readNodeHeader(_ reader: inout ByteReader) -> NodeHeader? {
+        guard let nameRange = reader.readStringRange(),
+              let directoryFlag = reader.readByte(),
+              directoryFlag <= 1,
+              let size = reader.readI64(),
+              size >= 0,
+              let rawFileCount = reader.readI32(),
+              rawFileCount >= 0,
+              let rawChildCount = reader.readI32(),
+              rawChildCount >= 0,
+              Int(rawChildCount) <= reader.remaining / minimumNodeBytes else { return nil }
+        return NodeHeader(nameRange: nameRange, isDirectory: directoryFlag == 1,
+                          size: size, fileCount: Int(rawFileCount),
+                          childCount: Int(rawChildCount))
     }
 
     // MARK: Misc

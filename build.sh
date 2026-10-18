@@ -46,7 +46,8 @@ for ARCH in "${BUILD_ARCHS[@]}"; do
         -target "$ARCH-apple-macos14.0" \
         -framework Combine \
         Sources/FileNode.swift Sources/DiskAccess.swift \
-        Sources/ScanExecutionLock.swift Sources/ScanStore.swift \
+        Sources/ScanExecutionLock.swift Sources/BinaryCoding.swift \
+        Sources/ScanStore.swift \
         Sources/Scanner.swift Helper/ScheduledScanMain.swift \
         -o "$BUILD_TMP/$HELPER_BIN-$ARCH"
 done
