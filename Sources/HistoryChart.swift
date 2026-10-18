@@ -13,6 +13,10 @@ struct HistoryRequest: Identifiable {
 /// Stacked-area chart of how a folder's contents evolved across the archived
 /// scans of its enclosing scan. Directory bands and legend entries can be used
 /// to navigate deeper without closing the sheet.
+///
+/// Every archived scan is read once, as a compact `HistorySummary`, when the
+/// sheet opens. Drilling down, going back and changing the depth then only
+/// re-slice those in memory, so navigation never touches the disk.
 struct HistoryChartView: View {
     let request: HistoryRequest
     @Environment(\.dismiss) private var dismiss
@@ -20,10 +24,17 @@ struct HistoryChartView: View {
     private var historyDepth = AppSettings.defaultHistoryDepth
 
     @State private var navigation: [HistoryLocation]
-    @State private var samples: [HistorySample] = []
+    @State private var summaries: [HistorySummary] = []
+    @State private var chart = ChartData()
     @State private var timelineDates: [Date] = []
-    @State private var processedSnapshots = 0
+    @State private var loadedSnapshots = 0
     @State private var loading = true
+
+    /// Peak memory, not throughput, is the limit while summaries are still
+    /// being built: each build decompresses a whole archive.
+    private static let maxConcurrentLoads = 4
+    /// Roughly how many dates the X axis should label before thinning.
+    private static let maxAxisLabels = 8
 
     private struct HistoryLocation: Hashable, Identifiable {
         let path: String
@@ -32,10 +43,23 @@ struct HistoryChartView: View {
     }
 
     private struct Point: Identifiable {
-        let id = UUID()
+        /// Stable across recomputations, so SwiftUI reuses marks instead of
+        /// rebuilding the whole chart whenever another snapshot arrives.
+        let id: String
         let date: Date
         let categoryID: String
         let size: Double
+    }
+
+    /// Everything the chart and legend draw, computed once per data change
+    /// rather than on every `body` evaluation.
+    private struct ChartData {
+        var categories: [CategorySize] = []
+        var identities: [String] = []
+        var colors: [Color] = []
+        var colorByIdentity: [String: Color] = [:]
+        var points: [Point] = []
+        var samples: [HistorySample] = []
     }
 
     init(request: HistoryRequest) {
@@ -50,9 +74,7 @@ struct HistoryChartView: View {
                                            name: request.folderName)
     }
 
-    private var loadID: String {
-        "\(currentFolder.path)|\(historyDepth)"
-    }
+    private var sliceID: String { "\(currentFolder.path)|\(historyDepth)" }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,6 +84,8 @@ struct HistoryChartView: View {
                 loadingView
             } else if timelineDates.count < 2 {
                 notEnoughView
+            } else if !loading && chart.samples.isEmpty {
+                tooSmallView
             } else {
                 VStack(spacing: 0) {
                     chartAndLegend.padding(16)
@@ -73,38 +97,105 @@ struct HistoryChartView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 500)
-        .task(id: loadID) {
-            await load(folder: currentFolder, depth: historyDepth)
-        }
+        .task(id: request.rootPath) { await loadSummaries() }
+        .onChange(of: sliceID) { refreshChart() }
     }
 
-    private func load(folder: HistoryLocation, depth: Int) async {
+    // MARK: Loading (once per sheet) and slicing (instant)
+
+    private func loadSummaries() async {
         loading = true
-        samples = []
-        timelineDates = []
-        processedSnapshots = 0
+        summaries = []
+        chart = ChartData()
+        loadedSnapshots = 0
+
         let rootPath = request.rootPath
         let entries = await Task.detached(priority: .userInitiated) {
             ScanStore.history(forRootPath: rootPath)
         }.value
-        guard currentFolder.path == folder.path, historyDepth == depth else { return }
+        guard !Task.isCancelled else { return }
         timelineDates = entries.map(\.date)
-
-        for entry in entries.reversed() {
-            guard !Task.isCancelled else { return }
-            let sample = await Task.detached(priority: .userInitiated) {
-                ScanStore.folderHistorySample(entry: entry, folderPath: folder.path,
-                                              depth: depth)
-            }.value
-            guard !Task.isCancelled, currentFolder.path == folder.path,
-                  historyDepth == depth else { return }
-            if let sample {
-                samples.append(sample)
-                samples.sort { $0.date < $1.date }
-            }
-            processedSnapshots += 1
+        guard !entries.isEmpty else {
+            loading = false
+            return
         }
+
+        // Newest first, so the most useful part of the chart appears first.
+        var pending = Array(entries.reversed()).makeIterator()
+        await withTaskGroup(of: HistorySummary?.self) { group in
+            for _ in 0..<Self.maxConcurrentLoads {
+                guard let entry = pending.next() else { break }
+                group.addTask { await HistorySummaryStore.shared.summary(for: entry) }
+            }
+            for await summary in group {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
+                if let summary {
+                    summaries.append(summary)
+                    summaries.sort { $0.date < $1.date }
+                }
+                loadedSnapshots += 1
+                refreshChart()
+                if let entry = pending.next() {
+                    group.addTask { await HistorySummaryStore.shared.summary(for: entry) }
+                }
+            }
+        }
+        guard !Task.isCancelled else { return }
         loading = false
+    }
+
+    /// Re-slice the loaded summaries for the current folder and depth. Pure
+    /// in-memory work over a few thousand nodes per snapshot.
+    private func refreshChart() {
+        let folderPath = currentFolder.path
+        let depth = historyDepth
+        let samples = summaries.compactMap { summary -> HistorySample? in
+            guard let categories = summary.categories(folderPath: folderPath, depth: depth)
+            else { return nil }
+            return HistorySample(date: summary.date, categories: categories)
+        }
+
+        let categories = orderedCategories(in: samples)
+        let colors = categories.indices.map { NodePalette.categoryColor($0) }
+        let identities = categories.map(\.identity)
+        var colorByIdentity: [String: Color] = [:]
+        for (identity, color) in zip(identities, colors) { colorByIdentity[identity] = color }
+
+        var points: [Point] = []
+        points.reserveCapacity(samples.count * categories.count)
+        for sample in samples {
+            let sizes = Dictionary(sample.categories.map { ($0.identity, $0.size) },
+                                   uniquingKeysWith: { first, _ in first })
+            let stamp = sample.date.timeIntervalSince1970
+            for identity in identities {
+                points.append(Point(id: "\(stamp)|\(identity)", date: sample.date,
+                                    categoryID: identity,
+                                    size: Double(sizes[identity] ?? 0)))
+            }
+        }
+
+        chart = ChartData(categories: categories, identities: identities, colors: colors,
+                          colorByIdentity: colorByIdentity, points: points, samples: samples)
+    }
+
+    /// Categories ordered by their size in the most recent scan, with any that
+    /// only appear in older scans appended after. Walking the samples from
+    /// newest to oldest keeps colors stable as older snapshots arrive.
+    private func orderedCategories(in samples: [HistorySample]) -> [CategorySize] {
+        guard let latest = samples.last else { return [] }
+        let order = latest.categories.sorted { $0.size > $1.size }
+        var seen = Set(order.map(\.identity))
+        var extra: [CategorySize] = []
+        for sample in samples.reversed() {
+            for category in sample.categories where !seen.contains(category.identity) {
+                seen.insert(category.identity)
+                extra.append(category)
+            }
+        }
+        return order + extra.sorted { $0.size > $1.size }
     }
 
     // MARK: Header and navigation
@@ -125,8 +216,8 @@ struct HistoryChartView: View {
                 Text("History — \(currentFolder.name)").font(.headline)
                 breadcrumb
                 Text(loading
-                     ? "\(currentFolder.path) · \(processedSnapshots) of \(timelineDates.count) scans read"
-                     : "\(currentFolder.path) · \(samples.count) scans · \(historyDepth) \(historyDepth == 1 ? "layer" : "layers")")
+                     ? "\(currentFolder.path) · \(loadedSnapshots) of \(timelineDates.count) scans read"
+                     : "\(currentFolder.path) · \(chart.samples.count) scans · \(historyDepth) \(historyDepth == 1 ? "layer" : "layers")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -170,10 +261,10 @@ struct HistoryChartView: View {
 
     private var loadingProgress: some View {
         HStack(spacing: 10) {
-            ProgressView(value: Double(processedSnapshots),
+            ProgressView(value: Double(loadedSnapshots),
                          total: Double(max(timelineDates.count, 1)))
                 .frame(width: 150)
-            Text("Loading snapshots newest first — \(processedSnapshots) of \(timelineDates.count)")
+            Text("Loading snapshots newest first — \(loadedSnapshots) of \(timelineDates.count)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -195,43 +286,16 @@ struct HistoryChartView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
     }
 
-    // MARK: Data
-
-    /// Categories ordered by their size in the most recent scan, with any that
-    /// only appear in older scans appended after.
-    private var orderedCategories: [CategorySize] {
-        guard let latest = samples.last else { return [] }
-        var order = latest.categories.sorted { $0.size > $1.size }
-        var seen = Set(order.map(\.identity))
-        var extra: [CategorySize] = []
-        // Samples are stored oldest-to-newest, but loading happens in the other
-        // direction. Preserve that discovery order so existing colors never
-        // reshuffle when another older archive arrives.
-        for sample in samples.reversed() {
-            for category in sample.categories where !seen.contains(category.identity) {
-                seen.insert(category.identity)
-                extra.append(category)
-            }
+    private var tooSmallView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "scalemass")
+                .font(.system(size: 34)).foregroundStyle(.secondary)
+            Text("Too small to be tracked in history").font(.headline)
+            Text("History keeps only the largest folders of each scan, and \(currentFolder.name) was below that limit in every one. Open it in the treemap to see its current contents.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).frame(maxWidth: 420)
         }
-        order += extra.sorted { $0.size > $1.size }
-        return order
-    }
-
-    private var points: [Point] {
-        let categories = orderedCategories
-        guard !categories.isEmpty else { return [] }
-        return samples.flatMap { sample -> [Point] in
-            let sizes = Dictionary(sample.categories.map { ($0.identity, $0.size) },
-                                   uniquingKeysWith: { first, _ in first })
-            return categories.map { category in
-                Point(date: sample.date, categoryID: category.identity,
-                      size: Double(sizes[category.identity] ?? 0))
-            }
-        }
-    }
-
-    private var colors: [Color] {
-        orderedCategories.indices.map { NodePalette.categoryColor($0) }
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding()
     }
 
     private func drillDown(to category: CategorySize) {
@@ -247,7 +311,7 @@ struct HistoryChartView: View {
 
     private var chartAndLegend: some View {
         HStack(alignment: .top, spacing: 16) {
-            chart
+            chartView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             legend
                 .frame(width: 220)
@@ -263,14 +327,13 @@ struct HistoryChartView: View {
                 .foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                    ForEach(orderedCategories) { category in
-                        let color = color(for: category)
+                    ForEach(chart.categories) { category in
                         Button {
                             drillDown(to: category)
                         } label: {
                             HStack(spacing: 7) {
                                 RoundedRectangle(cornerRadius: 2)
-                                    .fill(color)
+                                    .fill(chart.colorByIdentity[category.identity] ?? .gray)
                                     .frame(width: 11, height: 11)
                                 Text(category.name)
                                     .lineLimit(1)
@@ -295,15 +358,8 @@ struct HistoryChartView: View {
         }
     }
 
-    private func color(for category: CategorySize) -> Color {
-        guard let index = orderedCategories.firstIndex(where: {
-            $0.identity == category.identity
-        }) else { return .gray }
-        return colors[index]
-    }
-
-    private var chart: some View {
-        Chart(points) { point in
+    private var chartView: some View {
+        Chart(chart.points) { point in
             AreaMark(
                 x: .value("Date", point.date),
                 y: .value("Size", point.size),
@@ -312,10 +368,7 @@ struct HistoryChartView: View {
             .foregroundStyle(by: .value("Folder", point.categoryID))
             .interpolationMethod(.monotone)
         }
-        .chartForegroundStyleScale(
-            domain: orderedCategories.map(\.identity),
-            range: colors
-        )
+        .chartForegroundStyleScale(domain: chart.identities, range: chart.colors)
         .chartLegend(.hidden)
         .chartXScale(domain: timelineDomain)
         .chartYAxis {
@@ -329,7 +382,7 @@ struct HistoryChartView: View {
             }
         }
         .chartXAxis {
-            AxisMarks(values: timelineDates) { value in
+            AxisMarks(values: axisDates) { value in
                 AxisGridLine()
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
@@ -362,6 +415,18 @@ struct HistoryChartView: View {
         return start < end ? start...end : start...start.addingTimeInterval(1)
     }
 
+    /// Evenly spaced scan dates, so a long history does not crowd the axis
+    /// with one label per scan. The last scan is always labelled.
+    private var axisDates: [Date] {
+        guard timelineDates.count > Self.maxAxisLabels else { return timelineDates }
+        let stride = Int((Double(timelineDates.count) / Double(Self.maxAxisLabels)).rounded(.up))
+        var picked = timelineDates.enumerated()
+            .filter { $0.offset % stride == 0 }
+            .map(\.element)
+        if let last = timelineDates.last, picked.last != last { picked.append(last) }
+        return picked
+    }
+
     /// Resolve a click to the nearest archived sample and then to the category
     /// occupying that vertical position in the stack.
     private func selectBand(at location: CGPoint, plotFrame: CGRect,
@@ -371,14 +436,14 @@ struct HistoryChartView: View {
                                 y: location.y - plotFrame.minY)
         guard let date = proxy.value(atX: plotPoint.x, as: Date.self),
               let value = proxy.value(atY: plotPoint.y, as: Double.self),
-              let sample = samples.min(by: {
+              let sample = chart.samples.min(by: {
                   abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
               }) else { return }
 
         let sizes = Dictionary(sample.categories.map { ($0.identity, $0.size) },
                                uniquingKeysWith: { first, _ in first })
         var cumulative = 0.0
-        for category in orderedCategories {
+        for category in chart.categories {
             cumulative += Double(sizes[category.identity] ?? 0)
             if value <= cumulative {
                 drillDown(to: category)
