@@ -125,10 +125,15 @@ enum ScanStore {
         index.append(entry)
         writeIndex(index)
 
+        // Both encodings read the tree while the main actor owns it; only
+        // compression and I/O move to the background.
         let encoded = encodeTree(rootPath: rootPath, date: date, root: root)
+        let summary = HistorySummary.build(from: root, rootPath: rootPath, date: date)
+            .encoded()
         writeQueue.async {
             let payload = pack(encoded)
             try? payload.write(to: historyDir.appendingPathComponent(name), options: .atomic)
+            writeSummaryPayload(pack(summary), forArchive: name)
         }
     }
 
@@ -143,9 +148,12 @@ enum ScanStore {
                                      totalSize: root.size, fileCount: root.fileCount,
                                      categories: categories(of: root, depth: 1))
         let payload = pack(encodeTree(rootPath: rootPath, date: date, root: root))
+        let summary = pack(HistorySummary.build(from: root, rootPath: rootPath,
+                                                date: date).encoded())
 
         try payload.write(to: currentURL, options: .atomic)
         try payload.write(to: historyDir.appendingPathComponent(name), options: .atomic)
+        writeSummaryPayload(summary, forArchive: name)
         var index = readIndex()
         index.append(entry)
         try writeIndexThrowing(index)
@@ -216,9 +224,11 @@ enum ScanStore {
         return decodeTree(unpacked)
     }
 
-    /// Load one point in a folder's history. Keeping this operation per-entry
-    /// lets the UI render the newest snapshot immediately and add older points
-    /// progressively instead of waiting for the entire archive.
+    /// Exact child breakdown for one archived scan, by fully decoding it.
+    /// The history chart uses summaries instead; this remains the reference
+    /// implementation they are verified against, and the fallback for an
+    /// archive whose summary cannot be built. Decoding a `/` scan takes
+    /// seconds and hundreds of MB, so never call it on the main thread.
     static func folderHistorySample(entry: ScanHistoryEntry, folderPath: String,
                                     depth: Int) -> HistorySample? {
         if folderPath == entry.rootPath && depth == 1,
@@ -233,27 +243,6 @@ enum ScanStore {
 
     private static func categoryHasPathMetadata(_ category: CategorySize) -> Bool {
         (category.path != nil && category.isDirectory != nil) || category.name == "Other"
-    }
-
-    /// Child breakdown of one folder across the archived scans of `rootPath`,
-    /// oldest first. A one-layer root chart can use the fast inline categories
-    /// when every entry has modern path metadata. Other cases decode each
-    /// archive and navigate to the folder, so call this off the main thread.
-    static func folderHistory(rootPath: String, folderPath: String,
-                              depth: Int) -> [HistorySample] {
-        let entries = readIndex().filter { $0.rootPath == rootPath }.sorted { $0.date < $1.date }
-        if folderPath == rootPath && depth == 1,
-           entries.allSatisfy({ entry in
-               guard let categories = entry.categories else { return false }
-               return categories.allSatisfy { categoryHasPathMetadata($0) }
-           }) {
-            return entries.map {
-                HistorySample(date: $0.date, categories: $0.categories ?? [])
-            }
-        }
-        return entries.compactMap {
-            folderHistorySample(entry: $0, folderPath: folderPath, depth: depth)
-        }
     }
 
     /// Locate a node by its absolute path within an archived tree.
@@ -401,6 +390,104 @@ enum ScanStore {
         return NodeHeader(nameRange: nameRange, isDirectory: directoryFlag == 1,
                           size: size, fileCount: Int(rawFileCount),
                           childCount: Int(rawChildCount))
+    }
+
+    // MARK: History summaries
+
+    private static var summariesDir: URL {
+        let dir = historyDir.appendingPathComponent("summaries", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static func summaryURL(forArchive file: String) -> URL {
+        summariesDir.appendingPathComponent(file + ".dtsum")
+    }
+
+    static func hasSummary(forArchive file: String) -> Bool {
+        FileManager.default.fileExists(atPath: summaryURL(forArchive: file).path)
+    }
+
+    private static func writeSummaryPayload(_ payload: Data, forArchive file: String) {
+        try? payload.write(to: summaryURL(forArchive: file), options: .atomic)
+    }
+
+    static func loadSummary(forArchive file: String) -> HistorySummary? {
+        guard let raw = try? Data(contentsOf: summaryURL(forArchive: file)),
+              let unpacked = unpack(raw) else { return nil }
+        return HistorySummary.decoded(unpacked)
+    }
+
+    /// Build the summary for an archive written before summaries existed and
+    /// store it. The `.dtscan` file itself is only ever read.
+    static func buildSummary(forArchive entry: ScanHistoryEntry) -> HistorySummary? {
+        HistoryBackup.ensureBackup(dataDirectory: dataDirectory)
+        guard let summary = summary(fromArchive: entry.file) else { return nil }
+        writeSummaryPayload(pack(summary.encoded()), forArchive: entry.file)
+        return summary
+    }
+
+    /// Stream a `.dtscan` archive into a summary: one pass over the
+    /// decompressed bytes, pruning as it goes, with no `FileNode`, no path
+    /// strings and no allocation at all for the subtrees it discards.
+    private static func summary(fromArchive file: String) -> HistorySummary? {
+        guard let raw = try? Data(contentsOf: historyDir.appendingPathComponent(file)),
+              let unpacked = unpack(raw) else { return nil }
+        return unpacked.withUnsafeBytes { bytes -> HistorySummary? in
+            var reader = ByteReader(bytes)
+            guard reader.matches(magic: treeMagic),
+                  let timestamp = reader.readF64(),
+                  timestamp.isFinite,
+                  let rootPath = reader.readString(),
+                  !rootPath.isEmpty,
+                  let header = readNodeHeader(&reader),
+                  header.isDirectory || header.childCount == 0 else { return nil }
+
+            let threshold = HistorySummary.Limits.threshold(rootSize: header.size)
+            let root = SummaryPruneNode(name: reader.string(in: header.nameRange),
+                                        size: header.size,
+                                        isDirectory: header.isDirectory)
+            guard pruneChildren(count: header.childCount, into: root, depth: 1,
+                                threshold: threshold, reader: &reader),
+                  reader.isAtEnd else { return nil }
+            root.capChildren(to: HistorySummary.Limits.maxChildren)
+            return HistorySummary(rootPath: rootPath,
+                                  date: Date(timeIntervalSince1970: timestamp),
+                                  nodes: HistorySummary.flatten(root))
+        }
+    }
+
+    private static func pruneChildren(count: Int, into parent: SummaryPruneNode,
+                                      depth: Int, threshold: Int64,
+                                      reader: inout ByteReader) -> Bool {
+        for _ in 0..<count {
+            guard let header = readNodeHeader(&reader) else { return false }
+            // A child is never larger than its parent, so a subtree below the
+            // threshold (or past the depth limit) can be skipped wholesale.
+            if header.size >= threshold && depth <= HistorySummary.Limits.maxDepth {
+                let node = SummaryPruneNode(name: reader.string(in: header.nameRange),
+                                            size: header.size,
+                                            isDirectory: header.isDirectory)
+                parent.children.append(node)
+                guard pruneChildren(count: header.childCount, into: node,
+                                    depth: depth + 1, threshold: threshold,
+                                    reader: &reader) else { return false }
+            } else {
+                guard skipSubtrees(count: header.childCount, reader: &reader)
+                else { return false }
+            }
+        }
+        return true
+    }
+
+    /// Walk past `count` sibling subtrees without building anything.
+    private static func skipSubtrees(count: Int, reader: inout ByteReader) -> Bool {
+        var pending = count
+        while pending > 0 {
+            guard let header = readNodeHeader(&reader) else { return false }
+            pending += header.childCount - 1
+        }
+        return true
     }
 
     // MARK: Misc
