@@ -1,13 +1,13 @@
 import Foundation
 import AppKit
+import Security
 
 /// Full Disk Access can't be requested programmatically on macOS — only the user
 /// can grant it in System Settings. What we *can* do is detect whether we have it
 /// and deep-link the user straight to the correct settings pane.
 enum FullDiskAccess {
 
-    /// Probe a file that is only readable with Full Disk Access. If the read
-    /// succeeds, FDA is granted. Uses the TCC database, which always exists.
+    /// True only when an FDA-protected location could actually be read.
     static var isGranted: Bool {
         DiskAccess.hasFullDiskAccess
     }
@@ -24,7 +24,8 @@ enum FullDiskAccess {
     /// button that jumps to the right settings pane. Returns nothing; purely UI.
     @MainActor
     static func promptIfNeeded() {
-        guard !isGranted else { return }
+        // Only nag on proof of denial; an undetermined probe stays silent.
+        guard DiskAccess.status == .denied else { return }
 
         let alert = NSAlert()
         alert.messageText = "Grant Full Disk Access for complete scans"
@@ -45,5 +46,50 @@ enum FullDiskAccess {
         if alert.runModal().rawValue == 1000 {   // "Open Settings"
             openSettings()
         }
+    }
+
+    /// Printed by `DiskTree --check-full-disk-access`. Shows what the probes see
+    /// and how this binary is signed: TCC binds a grant to the code signature,
+    /// so a toggle that is on in System Settings but was granted to a build
+    /// signed differently (ad-hoc vs. Apple Development vs. Developer ID) does
+    /// not apply to this one.
+    static func diagnosticReport() -> String {
+        var lines = ["DiskTree Full Disk Access check",
+                     "Executable: \(Bundle.main.executablePath ?? "?")"]
+        lines += signingLines()
+        lines.append("Probes:")
+        lines += DiskAccess.diagnosticLines()
+        return lines.joined(separator: "\n")
+    }
+
+    private static func signingLines() -> [String] {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else {
+            return ["Signature: unavailable"]
+        }
+        var info: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(staticCode, flags, &info) == errSecSuccess,
+              let dict = info as? [String: Any] else {
+            return ["Signature: unavailable"]
+        }
+        let identifier = dict[kSecCodeInfoIdentifier as String] as? String ?? "?"
+        let team = dict[kSecCodeInfoTeamIdentifier as String] as? String ?? "none"
+        let codeFlags = (dict[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
+        let adHoc = codeFlags & 0x0002 != 0   // kSecCodeSignatureAdhoc
+
+        var requirement: SecRequirement?
+        var requirementText: CFString?
+        if SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess,
+           let requirement {
+            _ = SecRequirementCopyString(requirement, [], &requirementText)
+        }
+        return [
+            "Signature: identifier=\(identifier) team=\(team)\(adHoc ? " (ad-hoc)" : "")",
+            "Designated requirement: \((requirementText as String?) ?? "?")",
+        ]
     }
 }

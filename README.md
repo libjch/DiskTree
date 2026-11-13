@@ -95,6 +95,18 @@ macOS protects parts of the disk. For a complete scan, add the built or installe
 Without Full Disk Access, DiskTree still scans locations macOS allows it to read.
 The app never attempts to bypass macOS permissions.
 
+If DiskTree still asks for access while its switch is on, check what the running
+build actually sees:
+
+```bash
+/Applications/DiskTree.app/Contents/MacOS/DiskTree --check-full-disk-access
+```
+
+macOS ties the grant to the code signature that was approved. A build signed
+differently (ad-hoc, Apple Development, or Developer ID) does not inherit it,
+even though System Settings still shows the switch on. Remove DiskTree from the
+list with “−”, add the current `DiskTree.app` again with “+”, then relaunch it.
+
 ## How sizes are calculated
 
 DiskTree uses allocated-on-disk bytes (`totalFileAllocatedSize`), which represents

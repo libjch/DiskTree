@@ -23,7 +23,7 @@ struct ScheduledScanMain {
             ? nil : environment["DISKTREE_SCHEDULED_SCAN_ROOT"]
         let rootPath = testRoot ?? "/"
 
-        if rootPath == "/" && !DiskAccess.hasFullDiskAccess {
+        if rootPath == "/" && DiskAccess.status == .denied {
             finish(startedAt: startedAt, outcome: .failed,
                    message: "Full Disk Access is required for the scheduled scan")
             exit(ExitCode.noPermission)
