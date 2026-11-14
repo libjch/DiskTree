@@ -3,6 +3,9 @@ import SwiftUI
 enum AppSettings {
     static let treemapDepthKey = "treemapDepth"
     static let historyDepthKey = "historyDepth"
+    static let automaticUpdateCheckKey = "automaticallyCheckForUpdates"
+    static let lastUpdateCheckKey = "lastUpdateCheck"
+    static let skippedUpdateVersionKey = "skippedUpdateVersion"
 
     static let defaultTreemapDepth = 5
     static let defaultHistoryDepth = 2
@@ -16,6 +19,8 @@ struct SettingsView: View {
     private var treemapDepth = AppSettings.defaultTreemapDepth
     @AppStorage(AppSettings.historyDepthKey)
     private var historyDepth = AppSettings.defaultHistoryDepth
+    @AppStorage(AppSettings.automaticUpdateCheckKey)
+    private var automaticUpdateCheck = true
     @StateObject private var weeklyScheduler = WeeklyScanScheduler()
 
     var body: some View {
@@ -64,6 +69,18 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(lastRun.outcome == .failed ? .red : .secondary)
                     }
+                }
+            }
+
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $automaticUpdateCheck)
+                Text("Once a day, DiskTree reads a small version file from www.libjch.com. No identifiers or usage data are sent, and nothing is installed without you.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                LabeledContent("Installed version", value: UpdateChecker.currentVersion)
+                    .font(.caption)
+                Button("Check Now") {
+                    Task { await UpdateChecker.checkNow() }
                 }
             }
         }

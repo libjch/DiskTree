@@ -4,8 +4,8 @@ DiskTree is a native macOS utility for finding what is using your disk space. It
 combines a sortable folder outline with an interactive treemap, updates while a
 scan is running, and keeps local scan history.
 
-There is no account, subscription, analytics, or network service. Scan data stays
-on your Mac.
+There is no account, subscription, or analytics. Scan data stays on your Mac; the
+only network request is an optional daily update check.
 
 ## Features
 
@@ -95,17 +95,33 @@ macOS protects parts of the disk. For a complete scan, add the built or installe
 Without Full Disk Access, DiskTree still scans locations macOS allows it to read.
 The app never attempts to bypass macOS permissions.
 
-If DiskTree still asks for access while its switch is on, check what the running
-build actually sees:
+### After an update
+
+macOS ties the grant to the code signature that was approved. Notarized releases
+are all signed with the same Developer ID, so updating keeps Full Disk Access. A
+copy signed differently (an ad-hoc, Apple Development, or third-party build) does
+not inherit it, even though System Settings still shows the switch on.
+
+DiskTree detects this: it remembers the signature that last had access, and if a
+later copy is refused it shows **Approve DiskTree for Full Disk Access again**.
+**Reset & Open Settings** removes the outdated entry (`tccutil reset
+SystemPolicyAllFiles com.libjch.disktree`); then add `DiskTree.app` with “+”, turn
+it on, and relaunch. If the entry remains, remove it with “−” first.
+
+To see what the running copy sees:
 
 ```bash
 /Applications/DiskTree.app/Contents/MacOS/DiskTree --check-full-disk-access
 ```
 
-macOS ties the grant to the code signature that was approved. A build signed
-differently (ad-hoc, Apple Development, or Developer ID) does not inherit it,
-even though System Settings still shows the switch on. Remove DiskTree from the
-list with “−”, add the current `DiskTree.app` again with “+”, then relaunch it.
+## Updates
+
+Once a day at launch, DiskTree downloads a small JSON file from
+`www.libjch.com` and compares its version with the installed one. If a newer
+release exists it offers **Download** (opens the notarized DMG in your browser),
+**Later**, or **Skip This Version**. Nothing is installed automatically. Use
+**DiskTree → Check for Updates…** at any time, or turn the automatic check off in
+Settings → Updates. The request contains no identifiers or usage data.
 
 ## How sizes are calculated
 
@@ -116,7 +132,8 @@ again.
 
 ## Privacy and safety
 
-- DiskTree has no telemetry and makes no network requests.
+- DiskTree has no telemetry. Its only network request is the optional daily
+  update check described above.
 - Scan results and history are stored under the user's Application Support
   directory.
 - DiskTree is read-only: it does not delete, move, or modify scanned items.
@@ -135,6 +152,7 @@ again.
 | `Sources/WeeklyScanScheduler.swift` | Background-helper registration and status |
 | `Helper/ScheduledScanMain.swift` | Headless weekly scanner entry point |
 | `Sources/FullDiskAccess.swift` | Permission detection and guidance |
+| `Sources/UpdateChecker.swift` | Optional update check against the website feed |
 | `build.sh` | Strict Universal 2 build |
 | `notarize.sh` | Developer ID signing and Apple notarization |
 | `check.sh` | Local CI-equivalent checks |
@@ -167,7 +185,15 @@ Optional release environment variables:
 | --- | --- | --- |
 | `DISKTREE_NOTARY_PROFILE` | Keychain profile passed to `notarytool` | `DiskTree` |
 | `DISKTREE_SIGNING_IDENTITY` | Exact Developer ID identity | First matching identity |
-| `DISKTREE_SITE_DOWNLOADS` | Directory that receives a copy of the DMG | No copy |
+| `DISKTREE_SITE_DOWNLOADS` | Directory that receives the DMG and update feed | No copy |
+| `DISKTREE_DOWNLOAD_URL` | DMG URL written to the update feed | `https://www.libjch.com/downloads/DiskTree.dmg` |
+| `DISKTREE_RELEASE_NOTES` | Notes shown in the update dialog | Empty |
+
+To release an update, bump `CFBundleShortVersionString` and `CFBundleVersion` in
+`Info.plist`, run `./notarize.sh`, then upload `DiskTree.dmg` **before**
+`disktree-version.json`. The app reads the feed from the `DiskTreeUpdateFeedURL`
+key in `Info.plist`, and it only follows HTTPS download links on the feed's own
+host.
 
 Never commit certificates, private keys, app-specific passwords, or exported
 signing identities.

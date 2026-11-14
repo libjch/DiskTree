@@ -18,6 +18,11 @@ struct DiskTreeApp: App {
         .windowStyle(.titleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await UpdateChecker.checkNow() }
+                }
+            }
         }
 
         Settings {

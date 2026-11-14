@@ -12,6 +12,8 @@
     <string>1.1</string>
     <key>CFBundleShortVersionString</key>
     <string>1.1</string>
+    <key>DiskTreeUpdateFeedURL</key>
+    <string>https://www.libjch.com/downloads/disktree-version.json</string>
     <key>BuildDate</key>
     <string>unknown</string>
     <key>CFBundlePackageType</key>

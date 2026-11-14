@@ -32,8 +32,13 @@ struct ContentView: View {
             didCheckFDA = true
             // Restore the last scan so the app opens with results, not empty.
             scanner.loadSaved()
-            // Defer so the window is on screen before the modal appears.
-            DispatchQueue.main.async { FullDiskAccess.promptIfNeeded() }
+            // Defer so the window is on screen before the modal appears. The
+            // update check starts only after the FDA dialog (if any) is closed,
+            // so the two never stack.
+            DispatchQueue.main.async {
+                FullDiskAccess.promptIfNeeded()
+                Task { await UpdateChecker.checkInBackgroundIfDue() }
+            }
         }
         .onChange(of: scanner.root) {
             // Auto-expand the root of a freshly restored scan so its top-level

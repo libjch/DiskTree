@@ -16,6 +16,9 @@ DMG="DiskTree.dmg"
 VOLUME_NAME="DiskTree"
 PROFILE="${DISKTREE_NOTARY_PROFILE:-DiskTree}"
 SITE_DOWNLOADS="${DISKTREE_SITE_DOWNLOADS:-}"
+DOWNLOAD_URL="${DISKTREE_DOWNLOAD_URL:-https://www.libjch.com/downloads/DiskTree.dmg}"
+RELEASE_NOTES="${DISKTREE_RELEASE_NOTES:-}"
+UPDATE_FEED="disktree-version.json"
 DMG_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/disktree-dmg.XXXXXX")"
 trap 'rm -rf "$DMG_STAGING"' EXIT
 
@@ -74,13 +77,26 @@ echo "› Gatekeeper assessment:"
 spctl -a -vvv --type execute "$APP" 2>&1 | sed 's/^/    /'
 spctl -a -vvv --type open --context context:primary-signature "$DMG" 2>&1 | sed 's/^/    /'
 
-# 7. Optionally copy it to a separate website checkout.
+# 7. Write the update feed read by the app's "Check for Updates".
+#    JSON is produced by JavaScript so notes with quotes stay valid.
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+osascript -l JavaScript - "$VERSION" "$DOWNLOAD_URL" "$RELEASE_NOTES" > "$UPDATE_FEED" <<'JS'
+function run(argv) {
+    return JSON.stringify({ version: argv[0], url: argv[1], notes: argv[2] }, null, 2);
+}
+JS
+plutil -lint "$UPDATE_FEED"
+
+# 8. Optionally copy both to a separate website checkout. The DMG goes first so
+#    the feed never announces a version whose download isn't there yet.
 if [ -n "$SITE_DOWNLOADS" ]; then
     mkdir -p "$SITE_DOWNLOADS"
     cp "$DMG" "$SITE_DOWNLOADS/DiskTree.dmg"
+    cp "$UPDATE_FEED" "$SITE_DOWNLOADS/$UPDATE_FEED"
 fi
 
-echo "✓ Notarized, stapled → $DMG"
+echo "✓ Notarized, stapled → $DMG (version $VERSION)"
+echo "  Update feed → $UPDATE_FEED (download: $DOWNLOAD_URL)"
 if [ -n "$SITE_DOWNLOADS" ]; then
-    echo "  Copied to $SITE_DOWNLOADS/DiskTree.dmg"
+    echo "  Copied both to $SITE_DOWNLOADS/ — upload the DMG before the feed."
 fi

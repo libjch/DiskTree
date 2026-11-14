@@ -32,7 +32,8 @@ This builds with a **plain `swiftc` script**, not an `.xcodeproj`.
 | `FileNode.swift` | Tree model (path-based identity) + byte formatting |
 | `Treemap.swift` | Nested squarified treemap + `NodePalette` (shared colors); depth comes from `AppSettings`. |
 | `HistoryChart.swift` | Progressive stacked-area history chart, drill-down, breadcrumb/back navigation |
-| `FullDiskAccess.swift` | FDA detection + guidance |
+| `FullDiskAccess.swift` | FDA guidance, stale-grant detection/reset, diagnostics |
+| `UpdateChecker.swift` | Daily/manual update check against the website JSON feed |
 | `DiskAccess.swift` | Foundation-only FDA probe shared with the helper |
 | `ScanExecutionLock.swift` | Cross-process exclusion for GUI/helper scans |
 
@@ -62,7 +63,10 @@ signs it at `DiskTree.app/Contents/Helpers/DiskTreeWeeklyScan`.
 - `DISKTREE_INSTALL=1` — copy build to /Applications.
 - `DISKTREE_SCHEDULED_SCAN_ROOT` — helper test root; honored only when
   `DISKTREE_DATA_DIR` is also set.
-- `notarize.sh`: `DISKTREE_NOTARY_PROFILE`, `DISKTREE_SIGNING_IDENTITY`, `DISKTREE_SITE_DOWNLOADS`.
+- `notarize.sh`: `DISKTREE_NOTARY_PROFILE`, `DISKTREE_SIGNING_IDENTITY`, `DISKTREE_SITE_DOWNLOADS`,
+  `DISKTREE_DOWNLOAD_URL`, `DISKTREE_RELEASE_NOTES`.
+- `DiskTree --check-full-disk-access` — prints FDA probe results and the code
+  signature vs. the last signature that had access; exits 0 only when granted.
 
 ## Current implementation notes
 - History sheets support in-place drill-down through directory bands and a
@@ -82,3 +86,12 @@ signs it at `DiskTree.app/Contents/Helpers/DiskTreeWeeklyScan`.
 - `ScanEngine.maybeSnapshotLocked()` must return immediately when `onProgress` is
   nil. The helper has no UI consumer; deep-copying a multi-million-node tree every
   two seconds made the first scheduled scan run for more than a day.
+- FDA detection (`DiskAccess`) probes several FDA-only paths; only `EPERM` counts
+  as denial. `FullDiskAccess` stores the designated requirement that last had
+  access (`fullDiskAccessGrantedRequirement`) and, on denial with a different
+  signature, offers `tccutil reset SystemPolicyAllFiles` + re-add guidance.
+- `build.sh` prefers the Developer ID identity so dev builds match releases;
+  mixing signatures voids the user's FDA grant while the switch stays on.
+- `UpdateChecker` reads `DiskTreeUpdateFeedURL` (Info.plist) at most daily, after
+  the FDA dialog. `notarize.sh` writes `disktree-version.json`. Download links
+  must be HTTPS on the feed's host; the app never installs anything itself.
