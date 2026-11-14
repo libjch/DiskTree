@@ -111,8 +111,12 @@ it on, and relaunch. If the entry remains, remove it with “−” first.
 To see what the running copy sees:
 
 ```bash
-/Applications/DiskTree.app/Contents/MacOS/DiskTree --check-full-disk-access
+open -n -W --stdout /tmp/disktree-fda.txt --stderr /tmp/disktree-fda.txt \
+  /Applications/DiskTree.app --args --check-full-disk-access; cat /tmp/disktree-fda.txt
 ```
+
+Launch it with `open` as above. Running the executable directly from a terminal
+makes macOS check the *terminal's* permission instead of DiskTree's.
 
 ## Updates
 

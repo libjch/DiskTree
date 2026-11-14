@@ -16,12 +16,15 @@ struct UpdateInfo: Decodable, Sendable {
 enum UpdateChecker {
     static let checkInterval: TimeInterval = 24 * 60 * 60
 
-    static var feedURL: URL? {
-        (Bundle.main.object(forInfoDictionaryKey: "DiskTreeUpdateFeedURL") as? String)
-            .flatMap { URL(string: $0) }
+    /// `DISKTREE_UPDATE_FEED_URL` overrides the Info.plist feed for testing
+    /// (e.g. a test file on the same site announcing version 99.0).
+    nonisolated static var feedURL: URL? {
+        let override = ProcessInfo.processInfo.environment["DISKTREE_UPDATE_FEED_URL"]
+        let configured = Bundle.main.object(forInfoDictionaryKey: "DiskTreeUpdateFeedURL") as? String
+        return (override ?? configured).flatMap { URL(string: $0) }
     }
 
-    static var currentVersion: String {
+    nonisolated static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
@@ -112,6 +115,34 @@ enum UpdateChecker {
             throw URLError(.badURL)
         }
         return info
+    }
+
+    /// Printed by `DiskTree --check-for-updates`: same fetch and validation as
+    /// the app, without any dialog. Exit status 0 when the feed was read.
+    nonisolated static func commandLineReport() -> (text: String, ok: Bool) {
+        final class Box: @unchecked Sendable { var value: (String, Bool) = ("", false) }
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        let current = currentVersion
+        guard let feedURL else { return ("No update feed URL configured", false) }
+        Task.detached {
+            var lines = ["Installed version: \(current)", "Feed: \(feedURL.absoluteString)"]
+            do {
+                let info = try await fetch(from: feedURL)
+                lines.append("Feed version: \(info.version)")
+                lines.append("Download: \(info.url.absoluteString)")
+                if let notes = info.notes, !notes.isEmpty { lines.append("Notes: \(notes)") }
+                lines.append(isNewer(info.version, than: current)
+                    ? "Result: update available" : "Result: up to date")
+                box.value = (lines.joined(separator: "\n"), true)
+            } catch {
+                lines.append("Result: check failed — \(error.localizedDescription)")
+                box.value = (lines.joined(separator: "\n"), false)
+            }
+            done.signal()
+        }
+        done.wait()
+        return box.value
     }
 
     /// Numeric dotted-version comparison: "1.10" > "1.9", "1.2" == "1.2.0".

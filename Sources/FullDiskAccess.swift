@@ -162,6 +162,10 @@ enum FullDiskAccess {
         } else {
             lines.append("Last copy with access: none recorded")
         }
+        if isatty(STDIN_FILENO) != 0 {
+            lines.append("WARNING: started from a terminal, so macOS checks the terminal's")
+            lines.append("  permission, not DiskTree's. Launch via `open` (see README).")
+        }
         lines.append("Probes:")
         lines += DiskAccess.diagnosticLines()
         return lines.joined(separator: "\n")

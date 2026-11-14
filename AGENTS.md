@@ -65,8 +65,13 @@ signs it at `DiskTree.app/Contents/Helpers/DiskTreeWeeklyScan`.
   `DISKTREE_DATA_DIR` is also set.
 - `notarize.sh`: `DISKTREE_NOTARY_PROFILE`, `DISKTREE_SIGNING_IDENTITY`, `DISKTREE_SITE_DOWNLOADS`,
   `DISKTREE_DOWNLOAD_URL`, `DISKTREE_RELEASE_NOTES`.
-- `DiskTree --check-full-disk-access` — prints FDA probe results and the code
-  signature vs. the last signature that had access; exits 0 only when granted.
+- `--check-full-disk-access` — prints FDA probe results and the code signature
+  vs. the last signature that had access. **Launch it via `open -n -W --stdout
+  FILE … --args --check-full-disk-access`**: run directly from a terminal (or a
+  Claude session), TCC checks the terminal's grant, not DiskTree's.
+- `--check-for-updates` — headless update check (same fetch/validation as the
+  app). `DISKTREE_UPDATE_FEED_URL` overrides the feed URL for testing.
+- Mac verification runbook for agents: `docs/MAC_RUNBOOK.md`.
 
 ## Current implementation notes
 - History sheets support in-place drill-down through directory bands and a
