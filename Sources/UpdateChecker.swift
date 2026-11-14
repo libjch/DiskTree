@@ -9,6 +9,30 @@ struct UpdateInfo: Decodable, Sendable {
     let notes: String?
 }
 
+/// Why a feed check failed, in words. `URLError` alone reports these as bare
+/// `NSURLErrorDomain` codes, which tells neither the user nor `--check-for-updates`
+/// what actually went wrong.
+enum UpdateCheckError: LocalizedError, Sendable {
+    case notHTTP
+    case httpStatus(Int)
+    case insecureDownloadURL(URL)
+    case downloadHostMismatch(expected: String, actual: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notHTTP:
+            return "The feed did not return an HTTP response."
+        case .httpStatus(let code):
+            let reason = HTTPURLResponse.localizedString(forStatusCode: code)
+            return "The feed returned HTTP \(code) (\(reason))."
+        case .insecureDownloadURL(let url):
+            return "The feed's download link is not HTTPS: \(url.absoluteString)"
+        case .downloadHostMismatch(let expected, let actual):
+            return "The feed's download link points at \(actual), not \(expected)."
+        }
+    }
+}
+
 /// Checks the website feed for a newer release. The request carries no
 /// identifiers or usage data, and DiskTree never installs anything itself:
 /// "Download" opens the notarized DMG in the browser.
@@ -106,13 +130,16 @@ enum UpdateChecker {
         let session = URLSession(configuration: .ephemeral)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
-        }
+        guard let http = response as? HTTPURLResponse else { throw UpdateCheckError.notHTTP }
+        guard http.statusCode == 200 else { throw UpdateCheckError.httpStatus(http.statusCode) }
         let info = try JSONDecoder().decode(UpdateInfo.self, from: data)
         // Only ever send the user to an HTTPS download on the feed's own host.
-        guard info.url.scheme == "https", info.url.host == feedURL.host else {
-            throw URLError(.badURL)
+        guard info.url.scheme == "https" else {
+            throw UpdateCheckError.insecureDownloadURL(info.url)
+        }
+        guard info.url.host == feedURL.host else {
+            throw UpdateCheckError.downloadHostMismatch(expected: feedURL.host ?? "the feed's host",
+                                                        actual: info.url.host ?? "an unknown host")
         }
         return info
     }

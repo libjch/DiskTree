@@ -216,8 +216,13 @@ JS
 ```
 
 ```bash
-cat /tmp/dt-feed.json && plutil -lint /tmp/dt-feed.json && python3 -m json.tool /tmp/dt-feed.json >/dev/null && echo valid
+cat /tmp/dt-feed.json && python3 -m json.tool /tmp/dt-feed.json >/dev/null && plutil -convert xml1 -o /dev/null /tmp/dt-feed.json && echo valid
 ```
+
+
+> `plutil -lint` is **not** a JSON validator — it rejects a perfectly valid JSON
+> file with `Unexpected character { at line 1`. Use `python3 -m json.tool` (and
+> `plutil -convert`, which does accept JSON) instead.
 
 If `osascript -` doesn't read the script from stdin, fix `notarize.sh`, for
 example by writing the script to a temp file.
