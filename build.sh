@@ -78,10 +78,17 @@ if [ -f AppIcon.icns ]; then
 fi
 
 # Sign with a stable identity if one exists, so macOS (TCC) remembers grants
-# like Full Disk Access across rebuilds. Falls back to ad-hoc otherwise.
-IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep -Eo '"(Developer ID Application|Apple Development)[^"]*"' \
+# like Full Disk Access across rebuilds. Prefer Developer ID: it matches the
+# notarized release, so a dev build installed over a release (or the reverse)
+# keeps the user's Full Disk Access grant. An Apple Development or ad-hoc
+# signature has a different designated requirement, which silently voids it.
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+IDENTITY="$(grep -Eo '"Developer ID Application[^"]*"' <<< "$IDENTITIES" \
     | head -1 | tr -d '"' || true)"
+if [ -z "$IDENTITY" ]; then
+    IDENTITY="$(grep -Eo '"Apple Development[^"]*"' <<< "$IDENTITIES" \
+        | head -1 | tr -d '"' || true)"
+fi
 
 if [ -n "$IDENTITY" ]; then
     echo "› Code signing with: $IDENTITY"

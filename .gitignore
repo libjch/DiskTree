@@ -10,6 +10,7 @@ DerivedData/
 DiskTree.app/
 DiskTree.zip
 DiskTree.dmg
+disktree-version.json
 *.dSYM/
 
 # Signing material must never be committed
