@@ -85,7 +85,9 @@ function run(argv) {
     return JSON.stringify({ version: argv[0], url: argv[1], notes: argv[2] }, null, 2);
 }
 JS
-plutil -lint "$UPDATE_FEED"
+# Validate as JSON: `plutil -lint` rejects valid JSON and would abort here,
+# after notarization succeeded but before anything is copied to the site.
+python3 -m json.tool "$UPDATE_FEED" >/dev/null
 
 # 8. Optionally copy both to a separate website checkout. The DMG goes first so
 #    the feed never announces a version whose download isn't there yet.
