@@ -22,6 +22,15 @@ Start the session with:
   your terminal or Claude app, and that already has Full Disk Access. Always use
   the `open` form in step 3: it launches DiskTree as its own process. The report
   prints a WARNING if it was started from a terminal.
+- **Before every dialog test, kill the running app by PID and relaunch with
+  `open`.** `osascript -e 'quit app "DiskTree"'` can silently fail, and `open`
+  then just re-activates the existing instance, so `.onAppear` never re-fires and
+  no dialog appears. Worse, an instance started from your shell inherits your
+  terminal's Full Disk Access, so it reports `granted` when the app itself is
+  denied. Verify with `pgrep -lf 'MacOS/DiskTree'` and
+  `ps eww -p <pid> | tr ' ' '\n' | grep DISKTREE_` — a clean `open` launch has no
+  `DISKTREE_*` variables. This cost one false "no dialog appeared" result.
+
 - Outward-facing actions need explicit permission from the user first: `tccutil
   reset` (it removes the user's Full Disk Access entry), uploading anything to
   www.libjch.com, running `./notarize.sh` (it submits to Apple), pushing, and
@@ -170,7 +179,7 @@ section to match.
 3. Simulate a signature change without touching permissions:
 
    ```bash
-   defaults write com.libjch.disktree fullDiskAccessGrantedRequirement 'identifier "simulated-old-build"'
+   defaults write com.libjch.disktree fullDiskAccessGrantedRequirement -string 'identifier "simulated-old-build"'
    ```
 
    Run the step 3 diagnostic: it must print `Last copy with access had a
@@ -340,3 +349,41 @@ Give the user this table filled in, plus any commits you made:
 
 If anything failed, fix it, re-run `./check.sh`, commit, and say what changed.
 Don't push or open a PR unless the user asks.
+
+## Results — run of 2026-11-14 (macOS Darwin 27.2)
+
+| Check | Result |
+| --- | --- |
+| Identities available / used by `build.sh` | Both present; `build.sh` correctly chose **Developer ID Application: Jean-Christophe Libbrecht (3VY899RQ89)** |
+| DR of old install vs. new build | **Different.** Old: `certificate leaf[subject.CN] = "Apple Development: libjch@gmail.com (EQWLB2WP2K)"`. New: Developer ID OIDs + `leaf[subject.OU] = "3VY899RQ89"`. Root cause confirmed. |
+| Diagnostic via `open` | Correct. No terminal warning; `denied` before the grant, `granted` after, with Safari/Mail/Messages `readable`. |
+| Any probe returning `error …`, or a consent dialog? | None. But `~/Library/Application Support/com.apple.TCC/TCC.db` **does not exist on this macOS** — only the system-wide copy does — so that probe can only ever print `not present`. Harmless (ignored by `status`) but misleading as the first line of the report. |
+| `tccutil reset` without sudo | **Works.** Exit 0, entry removed from the list. The in-app "Reset & Open Settings" button is viable; no fallback rewrite needed. (It prints its success line twice.) |
+| DR recorded in defaults after a granted launch | Matches `codesign -dr -` exactly. |
+| Simulated signature change | Reported verbatim as `Last copy with access had a DIFFERENT signature: …`, still `granted`. A granted relaunch silently repairs the stored value. |
+| Stale-grant dialog | **Confirmed by the user:** "Approve DiskTree for Full Disk Access again" with the "signed differently" wording and three buttons. |
+| Feed JSON generation (quotes, newline) | Valid. The runbook's own `plutil -lint` step was wrong and has been fixed. |
+| `--check-for-updates` | All paths correct: update available / up to date / cross-host rejected / `http://` rejected / 404 rejected / malformed rejected. Errors were opaque `NSURLErrorDomain` codes; now described in words. |
+| Update dialog | Confirmed: 99.0 announced with notes, Download opens the link, Skip records `skippedUpdateVersion=99.0` and suppresses the relaunch, the menu check ignores the skip and drops the Skip button, the 24 h throttle makes **zero** network requests, and the Settings toggle writes `0` while Check Now keeps working. |
+| Real website URLs | `disktree-version.json` returns **HTTP 404** — the feed has never been published. The DMG URL serves `application/x-apple-diskimage`. |
+
+### Deviations from what the runbook expected
+
+1. **The symptom is the toggle turning *off*, not staying on.** After installing a
+   differently-signed build over the old one, System Settings showed DiskTree
+   with its switch **off**, not on-but-ineffective. The stale-grant dialog text
+   ("even if System Settings still shows DiskTree switched on") therefore
+   describes a case that did not occur on this macOS version. The wording is
+   still correct for the `signatureChanged` path, but consider softening it.
+2. **Version numbering.** The branch was at 1.1 while 1.2 was already installed,
+   so the runbook's "bump to 1.2" is stale. Bumped to **1.3** for this run.
+
+### Not verified
+
+- The **Reset & Open Settings button press** itself. The underlying
+  `/usr/bin/tccutil reset SystemPolicyAllFiles com.libjch.disktree` that
+  `resetGrant()` spawns was proven to work (exit 0, entry removed), but the
+  button was never clicked, because access had already been restored.
+- Step 6.6 (ad-hoc signed build) and step 7c against the **real** website; a
+  local HTTP server was used instead, which exercises the same code paths.
+- Step 8 (release / notarization).
